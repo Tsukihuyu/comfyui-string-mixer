@@ -24,12 +24,18 @@ const NODE_TYPE = "TextGateSplit";
 const BAR_H = 30;        // 状态条固定高度
 const UP_H = 52;         // 上游预览条固定高度（不参与分配）
 const CHIPS_H = 112;     // 片段区最小高度
-const CHIPS_MAX = 340;   // 片段区先涨到这个高度，剩下的才给编辑框
-const TEXT_MIN = 108;    // 编辑框最小高度（框架吃掉约 16px，视觉约 92px）
-const TEXT_MAX = 720;    // 编辑框最大高度
+// 编辑框：高度跟着内容走 —— 最少露 2 行，最多 10 行（再多就在框内滚动）。
+// 10 行是固定高度，与节点宽窄无关；窄了只是每行字数少、要滚得更多。
+// 剩下的高度全部给片段区（片段区不设上限）。
+const TEXT_MIN_LINES = 2;
+const TEXT_MAX_LINES = 10;
+const TEXT_LINE_H = 15;  // 量不到真实行高时的兜底（canvas 单位）
+const TEXT_PAD_V = 4;    // 编辑框上下内边距（box-sizing: border-box）
+const TEXT_SLACK = 16;   // 框架给每个控件的固定开销：视觉高度 = computeSize − 16
+                         // （上下各 10px 外边距、又多算 4px；片段区/预览条一直按这个口径写）
 const UP_CHARS = 1200;   // 预览最多渲染多少字
 const DEFAULT_H = 470;   // 新建节点的高度
-const MIN_NODE_H = 416;  // 能缩到的最小高度（编辑框 108 + 片段 112 + 固定部分）
+const MIN_NODE_H = 416;  // 能缩到的最小高度（编辑框 2 行 + 片段 112 + 固定部分）
 // 节点里不归我们分配的部分（canvas 单位，实测）：标题 + join_mode + 预览条 + 状态条 + 间隙
 const FIXED_TOP = 26 + 24 + (UP_H + 16) + (BAR_H + 16) + 4 * 4 + 10;
 const RETRY_MS = 200;    // 队列忙时重试间隔
@@ -177,6 +183,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function textWidget(node) {
   return (node.widgets || []).find((w) => w && w.name === "text");
+}
+
+// 多行文字控件是 DOM widget，element 就是那个 <textarea>
+function textEl(node) {
+  const w = textWidget(node);
+  return w?.element || w?.inputEl || null;
 }
 
 function hasSource(node) {
@@ -744,16 +756,18 @@ function setupNode(node) {
   }
   st.mask = readMask(node);
 
-  // 编辑框固定高度，剩余空间给片段区
+  // 编辑框高度按内容算（layout 里分配），这里给个初值
   const textW = textWidget(node);
   if (textW) {
-    textW.computeSize = (width) => [width ?? 300, st.textH ?? TEXT_MIN];
+    textW.computeSize = (width) =>
+      [width ?? 300, (st.textH ?? TEXT_MIN_LINES * TEXT_LINE_H + TEXT_PAD_V) + TEXT_SLACK];
     const cb = textW.callback;
     textW.callback = function (...args) {
       const r = cb?.apply(this, args);
       cancelFlash(node);
       scheduleSplit(node);
       render(node);
+      queueLayout(node);
       return r;
     };
   }
@@ -913,7 +927,83 @@ function setupNode(node) {
   render(node);
 }
 
-// 版面分配：budget = 节点高度 - 固定部分，先给片段区（到 CHIPS_MAX），再给编辑框
+// 版面分配：编辑框按内容占 2~10 行，剩下的高度全给片段区
+//
+// 量行数的办法：拿一个隐藏的 div，套上编辑框同样的字体和宽度，把文字灌进去读高度。
+// 直接读 textarea 的 scrollHeight 不行——框比内容高的时候它只返回框高。
+let measureEl = null;
+function measureBox() {
+  if (measureEl?.isConnected) return measureEl;
+  measureEl = document.createElement("div");
+  measureEl.id = "tgs-measure";
+  measureEl.style.cssText =
+    "position:absolute;left:-9999px;top:0;visibility:hidden;"
+    + "box-sizing:content-box;margin:0;padding:0;border:0;"
+    + "white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;";
+  document.body.append(measureEl);
+  return measureEl;
+}
+
+function textMetrics(node) {
+  const el = textEl(node);
+  if (!el || !el.isConnected) return null;
+  const cs = getComputedStyle(el);
+  const padV = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const width = el.clientWidth
+    - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  const m = {
+    lineH: parseFloat(cs.lineHeight),
+    padV,
+    width: Math.max(60, width || 200),
+    font: cs.font || `${cs.fontSize} ${cs.fontFamily}`,
+    spacing: cs.letterSpacing,
+  };
+  // line-height 常是 "normal"（parseFloat 得到 NaN），量一次行高差就准了
+  if (!m.lineH || !isFinite(m.lineH)) m.lineH = measureLineH(m);
+  return m;
+}
+
+const lineHCache = new Map();
+function measureLineH(m) {
+  const key = `${m.font}|${m.spacing}`;
+  if (lineHCache.has(key)) return lineHCache.get(key);
+  const box = measureBox();
+  box.style.font = m.font;
+  box.style.letterSpacing = m.spacing;
+  box.style.width = "400px";
+  box.textContent = "M";
+  const one = box.scrollHeight;
+  box.textContent = "M\nM";
+  const lineH = Math.max(1, box.scrollHeight - one);
+  lineHCache.set(key, lineH);
+  return lineH;
+}
+
+function textLines(node) {
+  const w = textWidget(node);
+  const m = textMetrics(node);
+  if (!w || !m) return TEXT_MAX_LINES;
+  const value = String(w.value ?? "");
+  const cache = node.__tgs?.lineCache;
+  if (cache && cache.value === value && cache.width === m.width) return cache.lines;
+  const box = measureBox();
+  box.style.font = m.font;
+  box.style.letterSpacing = m.spacing;
+  box.style.width = `${m.width}px`;
+  box.textContent = value || " ";
+  const lines = Math.max(1, Math.round(box.scrollHeight / m.lineH));
+  if (node.__tgs) node.__tgs.lineCache = { value, width: m.width, lines };
+  return lines;
+}
+
+// 打字时行数会变：稍等再量，别每敲一个字就重排一遍
+function queueLayout(node) {
+  const st = node.__tgs;
+  if (!st) return;
+  clearTimeout(st.layoutTimer);
+  st.layoutTimer = setTimeout(() => layout(node), 120);
+}
+
 function layout(node) {
   const st = node.__tgs;
   const w = textWidget(node);
@@ -921,17 +1011,26 @@ function layout(node) {
 
   const H = node.size?.[1] || MIN_NODE_H;
   const budget = H - FIXED_TOP - 16; // 片段区的 +16 内边距单独扣掉
-  const extra = Math.max(0, budget - TEXT_MIN - CHIPS_H);
-  const chipsGrow = Math.min(extra, Math.max(0, CHIPS_MAX - CHIPS_H));
-  const chips = CHIPS_H + chipsGrow;
-  const text = Math.min(TEXT_MAX, TEXT_MIN + (extra - chipsGrow));
 
-  if (chips === st.chipsH && text === st.textH) return;
+  const m = textMetrics(node);
+  const lineH = m?.lineH || TEXT_LINE_H;
+  const padV = m?.padV ?? TEXT_PAD_V;
+  const lines = textLines(node);
+
+  const minText = TEXT_MIN_LINES * lineH + padV;
+  const maxText = TEXT_MAX_LINES * lineH + padV;
+  const want = Math.min(maxText, Math.max(minText, lines * lineH + padV));
+  // 片段区先保住最小高度，编辑框再退让；其余空间归片段区，不设上限
+  const text = Math.max(minText, Math.min(want, budget - CHIPS_H));
+  const chips = Math.max(CHIPS_H, budget - text);
+
+  if (chips === st.chipsH && text === st.textH && lines === st.lines) return;
   st.chipsH = chips;
   st.textH = text;
+  st.lines = lines;
 
   st.laying = true;
-  w.computeSize = (width) => [width ?? 300, text];
+  w.computeSize = (width) => [width ?? 300, text + TEXT_SLACK];
   st.chipsWidget.computeSize = (width) => [width ?? 300, chips + 16];
   const wrap = st.panel?.parentElement;
   if (wrap && wrap !== document.body) wrap.style.height = `${chips}px`;
