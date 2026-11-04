@@ -93,6 +93,10 @@ function ensureStyle() {
   color: #c9b4b4; background: rgba(160, 90, 90, 0.14);
   border-color: rgba(190, 110, 110, 0.5);
 }
+.tgs-btn[data-lock="1"][data-on="1"] {
+  color: #ffd98a; background: rgba(214, 158, 46, 0.24);
+  border-color: rgba(230, 180, 80, 0.8);
+}
 .tgs-status {
   flex: 1 1 auto; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
@@ -238,6 +242,74 @@ function writeMask(node, arr) {
   node.properties = node.properties || {};
   node.properties.tgs_mask = JSON.stringify(arr);
   app.graph?.change?.(); // 标脏，关窗口前会提示保存
+}
+
+// ------------------------------------------------------------------ 闸门状态：你动没动过手
+//
+// 闸门关的理由只有一个——你动过手。三条判据全部不成立才算“没动过”：
+//   * 没有手动锁（properties.tgs_lock）
+//   * 框内文字 == 上次流入的原文（properties.tgs_base）
+//   * 片段开关 == 上次流入时的开关（properties.tgs_mbase，缺省=全开）
+// 没动过时，全局 queue 会把新上游直接放进闸（注入 adopt=1 给后端），而不是拦截。
+// 老工作流没有 tgs_base：说明框里的字是你自己写的，一律当“已锁定”，绝不覆盖。
+
+function propStr(node, key) {
+  const v = node.properties?.[key];
+  return typeof v === "string" ? v : "";
+}
+
+function setProp(node, key, value) {
+  node.properties = node.properties || {};
+  if (value) node.properties[key] = value;
+  else delete node.properties[key];
+}
+
+function readMBase(node) {
+  try {
+    const v = JSON.parse(propStr(node, "tgs_mbase") || "[]");
+    return Array.isArray(v) ? v.map((x) => (x ? 1 : 0)) : [];
+  } catch {
+    return [];
+  }
+}
+
+// 把当前内容认作基线：以后拿它比“动没动过”
+function acceptAsBaseline(node) {
+  setProp(node, "tgs_base", sourceText(node));
+  const st = node.__tgs;
+  if (st?.mask?.length) setProp(node, "tgs_mbase", JSON.stringify(st.mask));
+  else setProp(node, "tgs_mbase", "");
+  setProp(node, "tgs_lock", "");
+  app.graph?.change?.();
+}
+
+// adopt 是纯注入用的输入（界面上不该多出这个插槽，插了也没意义）
+function hideAdoptSocket(node) {
+  const idx = (node.inputs || []).findIndex((i) => i && i.name === "adopt");
+  if (idx >= 0) {
+    node.inputs.splice(idx, 1);
+    node.setDirtyCanvas?.(true, true);
+  }
+}
+
+function gateState(node) {
+  const text = sourceText(node);
+  const manualLock = propStr(node, "tgs_lock") === "1";
+  // 框空 = 闸门本身就是开的，跟“动没动过”无关
+  if (!text.trim()) return { open: true, reason: "", manualLock };
+
+  const base = propStr(node, "tgs_base");
+  const reasons = [];
+  if (manualLock) reasons.push("手动锁");
+  if (!base) reasons.push("手写内容");
+  else if (text !== base) reasons.push("字改过");
+
+  const mask = node.__tgs?.mask || [];
+  const mbase = readMBase(node);
+  const baseMask = mbase.length === mask.length ? mbase : mask.map(() => 1);
+  if (mask.some((m, i) => (m ? 1 : 0) !== baseMask[i])) reasons.push("关了词");
+
+  return { open: reasons.length === 0, reason: reasons.join(" · "), manualLock };
 }
 
 // 文本变了以后，按「文字 + 出现次序」把旧的开关状态接过去（与 PromptToggle 同一套）
@@ -459,7 +531,10 @@ function render(node) {
   if (!st || !st.btn) return;
 
   const mode = modeOf(node);
-  st.dirty = mode === "snapshot" && st.baseline != null && sourceText(node) !== st.baseline;
+  const gate = gateState(node);
+  st.gate = gate;
+  // “锁着”才叫动过手；没动过手时闸门是开的，即便框里有字
+  st.dirty = mode === "snapshot" && !gate.open;
   const segs = st.segs || [];
   const onCount = segs.reduce((n, _, i) => n + (maskOn(st.mask, i) ? 1 : 0), 0);
   st.allOff = segs.length > 0 && onCount === 0;
@@ -475,13 +550,13 @@ function render(node) {
   } else if (mode === "void") {
     state = "void";
     label = "✎ 未接上游";
-  } else if (mode === "follow") {
+  } else if (gate.open) {
     state = "follow";
     label = "✎ 放入上游";
   } else if (st.armed === "pull") {
     state = "armed";
     label = "⚠ 再点一次覆盖";
-  } else if (st.dirty) {
+  } else {
     state = "dirty";
     label = "✎ 覆盖改动";
   }
@@ -499,19 +574,18 @@ function render(node) {
   } else if (mode === "follow") {
     note = "闸门开着 · 下次执行上游会整段流进来";
     tone = "info";
+  } else if (gate.open) {
+    note = "闸门开（未编辑）· 下次执行会换上新上游";
+    tone = "info";
   } else if (st.allOff) {
     note = "⚠ 片段全关，本次输出为空";
     tone = "error";
   } else if (st.blocked) {
-    note = "闸门关 · 上游被拦下（点 ✎ 放入）";
+    note = `闸门关（${gate.reason}）· 上游被拦下（点 ✎ 放入）`;
     tone = "warn";
-  } else if (st.dirty) {
-    note = (st.at ? "闸门关（已手改）" : "闸门关（手写）") + " · 点 ✕ 重新开闸";
-    tone = "warn";
-  } else if (st.at) {
-    note = `闸门关 · ${st.at} 放入 · 开 ${onCount}/${segs.length} 段`;
   } else {
-    note = "闸门关（手写） · 点 ✕ 重新开闸";
+    note = `闸门关（${gate.reason}）· 点 ✕ 重新开闸${segs.length ? ` · 开 ${onCount}/${segs.length} 段` : ""}`;
+    tone = "warn";
   }
   if (!st.busy && !st.error && st.flash) {
     note = st.flash.text;
@@ -521,7 +595,8 @@ function render(node) {
   const showClear = mode === "snapshot";
   const clearArmed = st.armed === "clear";
 
-  const sig = [state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0, st.busy ? 1 : 0].join("|");
+  const sig = [state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0,
+    st.busy ? 1 : 0, gate.manualLock ? 1 : 0].join("|");
   if (st.sig === sig) {
     updatePreview(node);
     return;
@@ -534,7 +609,7 @@ function render(node) {
   st.btn.title =
     (st.error ? st.error + "\n\n" : "") +
     "把上游放进框里：只执行本节点和它的上游（其他分支不动），上游没变时走缓存，基本瞬发。\n" +
-    "框空着时不用点它——下次执行上游会自己流进来。";
+    "框空着、或者你没动过手时，不用点它——下次执行会自己换。";
 
   if (st.clearBtn) {
     st.clearBtn.style.display = showClear ? "" : "none";
@@ -543,6 +618,20 @@ function render(node) {
       ? "再点一次：清空框，重新开闸（下次执行上游会流进来）"
       : "清空框，重新开闸";
     st.clearBtn.disabled = !!st.busy;
+  }
+
+  if (st.lockBtn) {
+    const lockedNow = gate.manualLock;
+    st.lockBtn.textContent = lockedNow ? "🔒" : "🔓";
+    st.lockBtn.dataset.on = lockedNow ? "1" : "";
+    st.lockBtn.disabled = !!st.busy || !sourceText(node).trim();
+    st.lockBtn.title = !sourceText(node).trim()
+      ? "框是空的，闸门本来就开着，不用锁"
+      : lockedNow
+        ? "已锁定：下次执行不会换掉这里的内容。点击 = 解锁，并把当前内容认作新基线"
+        : gate.open
+          ? "点一下锁住：下次执行不会自动换掉这里的内容"
+          : `已因「${gate.reason}」拦着。点一下再加一道手动锁`;
   }
 
   st.status.textContent = note;
@@ -595,6 +684,10 @@ function applyInflow(node, raw, count, why) {
   const w = textWidget(node);
   if (!st || !w) return;
   w.value = raw;
+  // 记住这次流进来的是哪一句：以后拿它比“你动没动过手”
+  setProp(node, "tgs_base", raw);
+  setProp(node, "tgs_mbase", "");
+  setProp(node, "tgs_lock", "");
   st.baseline = raw;
   st.dirty = false;
   st.blocked = false;
@@ -606,9 +699,12 @@ function applyInflow(node, raw, count, why) {
   refreshSegments(node); // 新词进来 -> 按文字接续旧的片段开关
   render(node);
   if (!raw.trim()) return;
-  flash(node, why === "auto"
-    ? `上游 ${raw.length} 字已流入框内，可直接改`
-    : `已放入上游 ${raw.length} 字`, "info", 3500);
+  const msg = why === "adopt"
+    ? `上游换了新词（${raw.length} 字）· 上次你没动过手，已自动换进来`
+    : why === "auto"
+      ? `上游 ${raw.length} 字已流入框内，可直接改`
+      : `已放入上游 ${raw.length} 字`;
+  flash(node, msg, "info", 4000);
 }
 
 function clearBox(node) {
@@ -616,6 +712,9 @@ function clearBox(node) {
   const w = textWidget(node);
   if (!st || !w) return;
   w.value = "";
+  setProp(node, "tgs_base", "");
+  setProp(node, "tgs_mbase", "");
+  setProp(node, "tgs_lock", "");
   st.baseline = "";
   st.dirty = false;
   st.blocked = false;
@@ -627,6 +726,30 @@ function clearBox(node) {
   refreshSegments(node);
   render(node);
   flash(node, "已开闸 · 下次执行上游会流进来", "info", 3000);
+}
+
+// 锁按钮：只负责手动锁本身。🔓 -> 锁上；🔒 -> 解开（并把当前内容认作新基线）
+// 因为“关了词/改过字”而关着的，点它只是再上一层手动锁，不会顺手把基线改掉。
+function onLockClick(node) {
+  const st = node.__tgs;
+  if (!st || st.busy || !sourceText(node).trim()) return;
+  cancelFlash(node);
+  const gate = gateState(node);
+  if (gate.manualLock) {
+    acceptAsBaseline(node);
+    flash(node, "已解锁（当前内容作为新基线）", "info", 3000);
+  } else {
+    setProp(node, "tgs_lock", "1");
+    app.graph?.change?.();
+    flash(node, "已锁定 · 下次执行不会换掉这里的内容", "warn", 3500);
+  }
+  st.sig = "";
+  render(node);
+}
+
+// 上游这次空着、而你框里有字：保留旧词，但要说清楚
+function warnEmptyUpstream(node) {
+  flash(node, "上游这次是空的 · 旧词保留（下次再有词会自动换）", "warn", 5000);
 }
 
 function onClearClick(node) {
@@ -724,7 +847,11 @@ function installPromptInjection() {
     for (const node of app.graph?._nodes || []) {
       if (node?.type !== NODE_TYPE || !node.__tgs) continue;
       const entry = out[String(node.id)];
-      if (entry?.inputs) entry.inputs.mask = JSON.stringify(node.__tgs.mask || []);
+      if (entry?.inputs) {
+        entry.inputs.mask = JSON.stringify(node.__tgs.mask || []);
+        // adopt=1：这次没动过手，后端直接把新上游放进闸（而不是拦下）
+        entry.inputs.adopt = gateState(node).open ? "1" : "0";
+      }
     }
     return res;
   };
@@ -738,7 +865,7 @@ function setupNode(node) {
   installPromptInjection();
 
   const st = (node.__tgs = {
-    btn: null, clearBtn: null, status: null,
+    btn: null, clearBtn: null, lockBtn: null, status: null,
     upEl: null, upHead: null, upBody: null,
     panel: null, list: null, count: null,
     segs: [], mask: [], seq: 0,
@@ -760,6 +887,7 @@ function setupNode(node) {
     node.widgets.splice(maskIdx, 1);
   }
   st.mask = readMask(node);
+  hideAdoptSocket(node);
 
   // 编辑框高度按内容算（layout 里分配），这里给个初值
   const textW = textWidget(node);
@@ -864,10 +992,24 @@ function setupNode(node) {
     onClearClick(node);
   });
 
+  // 手动锁：有时我只想留住这段词，一个字都不想改，也不想下次被换掉
+  const lockBtn = document.createElement("button");
+  lockBtn.type = "button";
+  lockBtn.className = "tgs-btn";
+  lockBtn.dataset.lock = "1";
+  lockBtn.textContent = "🔓";
+  lockBtn.style.padding = "0 6px";
+  lockBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  lockBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onLockClick(node);
+  });
+
   const status = document.createElement("span");
   status.className = "tgs-status";
-  sbar.append(btn, clearBtn, status);
-  st.btn = btn; st.clearBtn = clearBtn; st.status = status;
+  sbar.append(btn, clearBtn, lockBtn, status);
+  st.btn = btn; st.clearBtn = clearBtn; st.lockBtn = lockBtn; st.status = status;
 
   const barWidget = node.addDOMWidget("tgs_bar", "tgs_bar", sbar, { serialize: false });
   barWidget.serialize = false;
@@ -908,7 +1050,8 @@ function setupNode(node) {
     if (s) {
       s.mask = readMask(this);
       s.segs = []; // 让 refreshSegments 走「按存档位置沿用」那条路
-      s.baseline = sourceText(this);
+      s.baseline = propStr(this, "tgs_base");
+      hideAdoptSocket(this);
       s.dirty = false;
       s.blocked = false;
       s.armed = null;
@@ -1118,6 +1261,7 @@ app.registerExtension({
       const used = !!(message.ts_used && message.ts_used[0]);
       const blocked = !!(message.ts_blocked && message.ts_blocked[0]);
       const allOff = !!(message.tgs_all_off && message.tgs_all_off[0]);
+      const adopted = !!(message.tgs_adopted && message.tgs_adopted[0]);
 
       st.upSrc = raw;
       st.upAt = stamp();
@@ -1144,6 +1288,14 @@ app.registerExtension({
 
       cancelFlash(this);
 
+      // 上次没动过手 -> 后端这次直接把新上游放进了闸，框跟着换成新词
+      if (adopted) {
+        st.blocked = false;
+        st.upSig = "";
+        applyInflow(this, raw, count, "adopt");
+        return r;
+      }
+
       if (used) {
         if (!sourceText(this).trim() && raw.trim()) {
           st.upSig = "";
@@ -1156,7 +1308,11 @@ app.registerExtension({
         flash(this, "⚠ 片段全关，本次输出为空", "error", 5000);
       } else if (blocked) {
         st.blocked = true;
-        flash(this, `⚠ 上游 ${raw.length} 字被闸门拦下（框里有你的内容）· 点 ✎ 放入`, "warn", 5000);
+        flash(this, `⚠ 上游 ${raw.length} 字被闸门拦下（${gateState(this).reason || "你动过手"}）· 点 ✎ 放入`, "warn", 5000);
+      } else if (!raw.trim() && sourceText(this).trim()) {
+        // 上游这次给了空：旧词留着，但要说清楚（不然会以为它悄悄没跟上）
+        st.blocked = false;
+        warnEmptyUpstream(this);
       } else {
         st.blocked = false;
         render(this);

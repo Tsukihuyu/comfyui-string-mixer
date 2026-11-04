@@ -625,8 +625,8 @@ check("闸门炸词：是输出节点", mod.TextGateSplit.OUTPUT_NODE, True)
 _gs = mod.TextGateSplit()
 
 
-def gs(text, join_mode="comma", mask="", source=None):
-    return _gs.run(text=text, join_mode=join_mode, mask=mask, source=source)
+def gs(text, join_mode="comma", mask="", source=None, adopt=""):
+    return _gs.run(text=text, join_mode=join_mode, mask=mask, source=source, adopt=adopt)
 
 
 _r = gs("", source="红裙。长发; 微笑")
@@ -665,6 +665,34 @@ check("上游为空不算拦", _r["ui"]["ts_blocked"], [0])
 _r = gs("", source=None)
 check("空框 + 没上游 -> 输出空", _r["result"], ("",))
 check("空框 + 没上游 -> 不算取自上游", _r["ui"]["ts_used"], [0])
+
+# adopt：没动过手时让新上游直接进来（本次就用新词），动过手则照旧拦
+_r = gs("旧词, 旧的", mask=json.dumps([1, 1]), source="新词, 新的", adopt="1")
+check("adopt=1 -> 本次直接输出新上游", _r["result"], ("新词, 新的",))
+check("adopt=1 -> 标记已换词", _r["ui"]["tgs_adopted"], [1])
+check("adopt=1 -> 取自上游", _r["ui"]["ts_used"], [1])
+check("adopt=1 -> 不报拦下", _r["ui"]["ts_blocked"], [0])
+check("adopt=1 -> 不误报全关", _r["ui"]["tgs_all_off"], [0])
+
+_r = gs("旧词, 旧的", source="新词, 新的", adopt="1")
+check("adopt=1 关过词也照换（关词由前端判为动过手，不该注入 1）", _r["result"], ("新词, 新的",))
+
+_r = gs("我的词", source="上游的另一些词", adopt="0")
+check("adopt=0 -> 照旧拦下", _r["ui"]["ts_blocked"], [1])
+check("adopt=0 -> 输出箱内", _r["result"], ("我的词",))
+check("adopt=0 -> 不算换词", _r["ui"]["tgs_adopted"], [0])
+
+_r = gs("我的词", source="", adopt="1")
+check("adopt=1 但上游为空 -> 保留箱内", _r["result"], ("我的词",))
+check("adopt=1 但上游为空 -> 不算换词", _r["ui"]["tgs_adopted"], [0])
+
+_r = gs("我的词", source=None, adopt="1")
+check("adopt=1 但没接线 -> 保留箱内", _r["result"], ("我的词",))
+check("adopt=1 但没接线 -> 不算换词", _r["ui"]["tgs_adopted"], [0])
+
+_r = gs("", source="上游词", adopt="1")
+check("adopt=1 且框空 -> 走框空那条路", _r["result"], ("上游词",))
+check("adopt=1 且框空 -> 不算换词（本来就是空的）", _r["ui"]["tgs_adopted"], [0])
 
 print()
 if failures:

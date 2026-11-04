@@ -121,7 +121,12 @@ def _mask_array(mask_json, n):
 
 
 class TextGateSplit:
-    """TextGateSplit：闸门放上游进来，再按标点炸成片段逐段开关。"""
+    """TextGateSplit：闸门放上游进来，再按标点炸成片段逐段开关。
+
+    闸门的开关判据是「你动没动过手」，不是「框里有没有字」：
+      * 没动过手（没改字、没关词、没手动锁） -> 每次全局 queue 都把新上游放进来
+      * 动过手 -> 拦下上游，只输出框内（前端负责把这个判断注入 adopt）
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -130,7 +135,7 @@ class TextGateSplit:
                 "text": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "tooltip": "框内文字：空着=放上游进来；有字=只输出这里的内容，下方片段可逐段开关",
+                    "tooltip": "框内文字：空着=放上游进来；没动过手=下次执行自动换新上游；动过手=只输出这里的内容",
                 }),
                 "join_mode": (["comma", "original"], {
                     "default": "comma",
@@ -140,11 +145,15 @@ class TextGateSplit:
             "optional": {
                 "source": ("STRING", {
                     "forceInput": True,
-                    "tooltip": "上游文本：框空时执行会把上游整段写进框；框里有字时被拦下并报警",
+                    "tooltip": "上游文本：框空或没动过手时，执行会把上游整段放进来；动过手则被拦下并报警",
                 }),
                 "mask": ("STRING", {
                     "default": "",
                     "tooltip": "片段开关状态（0/1 的 JSON 数组），由节点界面自动注入，不用手填",
+                }),
+                "adopt": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "由节点界面注入：1 = 上次流入后没动过手，这次让新上游直接进来",
                 }),
             },
         }
@@ -155,19 +164,26 @@ class TextGateSplit:
     CATEGORY = "String-Mixer"
     OUTPUT_NODE = True
 
-    def run(self, text, join_mode, mask="", source=None):
+    def run(self, text, join_mode, mask="", source=None, adopt=""):
         linked, parts = snapshot_source(source)
         raw = "\n\n".join(parts)
         body = str(text)
         segs = split_prompt_segments(body)
         arr = _mask_array(mask, len(segs))
 
+        # adopt=1：上次流入之后用户没动过手。上游给的新词就是他要的，直接放行，
+        # 本次输出就是新词（不必跑两遍）。框空时本来就走这条路。
+        adopt_on = adopt == "1" and linked and bool(raw.strip()) and bool(body.strip())
+
         all_off = 1 if (segs and arr is not None and not any(arr)) else 0
         blocked = 0
-        if not body.strip():
+        adopted = 0
+        if not body.strip() or adopt_on:
             # 闸门开着：上游原样通过（不炸、不重拼）
             out = raw
             used = 1 if linked else 0
+            adopted = 1 if adopt_on else 0
+            all_off = 0
         else:
             used = 0
             if arr is None or all(arr) or not segs:
@@ -186,6 +202,7 @@ class TextGateSplit:
                 "tgs_total": [len(segs)],
                 "tgs_kept": [len(segs) if arr is None else sum(arr)],
                 "tgs_all_off": [all_off],
+                "tgs_adopted": [adopted],
             },
             "result": (out,),
         }
