@@ -1,0 +1,20 @@
+[project]
+name = "comfyui-string-mixer"
+version = "1.0.0"
+description = "Treat prompts as data: gate, split, toggle, merge, clean and shoot them. Eleven nodes for ComfyUI, plus an optional LLM rulebook writer."
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+readme = "README.md"
+keywords = ["comfyui", "prompt", "string", "prompt-engineering", "wildcards", "camera", "layout"]
+
+[project.urls]
+Repository = "https://github.com/Tsukihuyu/comfyui-string-mixer"
+Issues = "https://github.com/Tsukihuyu/comfyui-string-mixer/issues"
+
+# Comfy Registry 需要：PublisherId 必须先在 registry.comfy.org 存在，且与这里一致。
+# Icon 留空 = 用仓库默认；要放图标就填一个 raw.githubusercontent 的 png 直链。
+[tool.comfy]
+PublisherId = "chiduki-huyu"
+DisplayName = "String-Mixer"
+Icon = ""

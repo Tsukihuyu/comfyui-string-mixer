@@ -1,0 +1,49 @@
+; SkillPrompt —— HTTP endpoint profiles (example)
+;
+; Usage:
+;   1. copy this file to skillprompt.ini (same folder)
+;   2. uncomment the section you need and fill in base_url + model
+;   3. restart ComfyUI; every section shows up in the node's llm_model dropdown
+;
+; Keys:
+;   [section]     one dropdown entry; keep it ASCII, it doubles as the stable id
+;   name          display name shown in the dropdown (optional, any language)
+;   base_url      OpenAI-compatible endpoint, up to the /v1 part
+;   model         the model id that endpoint exposes
+;   api_key       optional; local servers usually need none
+;   api_key_env   optional; read the key from an env var (wins over api_key)
+;
+; Sections whose name starts with "example" are ignored, so notes are safe here.
+; skillprompt.ini holds addresses and possibly keys: never commit it.
+
+; ---- local llama.cpp (router mode or plain server) ----
+; [local-llamacpp]
+; name = local llama.cpp 27B
+; base_url = http://127.0.0.1:8080/v1
+; model = YOUR-MODEL-NAME
+
+; ---- Ollama ----
+; [ollama-14b]
+; name = Ollama 14B
+; base_url = http://127.0.0.1:11434/v1
+; model = qwen2.5:14b-instruct
+
+; ---- LM Studio ----
+; [lmstudio]
+; name = LM Studio 8B
+; base_url = http://127.0.0.1:1234/v1
+; model = qwen3-8b-instruct
+
+; ---- remote: DeepSeek (key from env, not from this file) ----
+; [deepseek]
+; name = DeepSeek
+; base_url = https://api.deepseek.com/v1
+; model = deepseek-chat
+; api_key_env = DEEPSEEK_API_KEY
+
+; ---- remote: OpenAI ----
+; [openai-mini]
+; name = OpenAI gpt-4o-mini
+; base_url = https://api.openai.com/v1
+; model = gpt-4o-mini
+; api_key_env = OPENAI_API_KEY

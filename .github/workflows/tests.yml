@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    env:
+      # Windows runner 的 stdout 是 cp1252，测试会打印中文和 ≈ 之类的字符，
+      # 不开 UTF-8 会以 UnicodeEncodeError 挂掉（跟节点本身无关）。
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Mixer nodes (no ComfyUI, no network)
+        run: python tests/selftest_mixer.py
+      - name: skillprompt subpackage
+        run: python -m unittest discover -s skillprompt/tests -p "test_*.py"

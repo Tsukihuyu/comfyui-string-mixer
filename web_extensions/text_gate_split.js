@@ -1,0 +1,1045 @@
+// TextGateSplit —— 闸门炸词：框空放上游进来，箱内文字按标点炸成可开关的片段
+//
+// 一个节点两段活，两段都沿用仓库里已有的实现：
+//   闸门段（同 TextSnapshot）：框空 -> 输出上游原样，并把上游写进框；
+//                              框里有字 -> 只输出框内，上游有差异则报警
+//   炸词段（同 PromptToggle）：框内文字按标点炸成片段，关掉的片段不进输出
+//
+// 输出规则：
+//   * 框空          -> 上游原样通过（不炸、不重拼标点）
+//   * 片段全开      -> 输出框内原文（同样不重拼）
+//   * 有关掉的片段  -> 按 join_mode 重拼（comma=", " / original=保留原标点）
+//   * 片段全关      -> 输出空 + 界面红字报警
+//   * 开关状态按文字内容接续（reconcile，与 PromptToggle 同一套）
+//
+// mask（片段开关的 0/1 数组）是纯状态：存 node.properties.tgs_mask，
+// 排队前由这里的 graphToPrompt 包装注入 mask 输入，界面上没有那一行控件。
+//
+// 三只眼睛：框（你的内容）/ 上游预览条（上次执行上游给了什么）/ 状态条（哪一态 + 放入上游）
+
+import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+
+const NODE_TYPE = "TextGateSplit";
+const BAR_H = 30;        // 状态条固定高度
+const UP_H = 52;         // 上游预览条固定高度（不参与分配）
+const CHIPS_H = 112;     // 片段区最小高度
+const CHIPS_MAX = 340;   // 片段区先涨到这个高度，剩下的才给编辑框
+const TEXT_MIN = 108;    // 编辑框最小高度（框架吃掉约 16px，视觉约 92px）
+const TEXT_MAX = 720;    // 编辑框最大高度
+const UP_CHARS = 1200;   // 预览最多渲染多少字
+const DEFAULT_H = 470;   // 新建节点的高度
+const MIN_NODE_H = 416;  // 能缩到的最小高度（编辑框 108 + 片段 112 + 固定部分）
+// 节点里不归我们分配的部分（canvas 单位，实测）：标题 + join_mode + 预览条 + 状态条 + 间隙
+const FIXED_TOP = 26 + 24 + (UP_H + 16) + (BAR_H + 16) + 4 * 4 + 10;
+const RETRY_MS = 200;    // 队列忙时重试间隔
+const RETRY_MAX = 10;
+const ARM_MS = 5000;     // "再点一次"的确认态
+const WAIT_MS = 300000;  // 等回填的兜底超时
+
+// ------------------------------------------------------------------ 样式
+
+function ensureStyle() {
+  if (document.getElementById("tgs-style")) return;
+  const css = document.createElement("style");
+  css.id = "tgs-style";
+  css.textContent = `
+.ts-bar, .tgs-bar {
+  display: flex; align-items: center; gap: 6px; height: 100%;
+  box-sizing: border-box; padding: 0 2px; overflow: hidden;
+}
+.tgs-btn {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  height: 24px; padding: 0 10px; border-radius: 6px; cursor: pointer;
+  font-family: inherit; font-size: 12px; line-height: 1; white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  color: #cfe0f5; background: rgba(120, 140, 170, 0.18);
+  border: 1px solid rgba(150, 165, 195, 0.45);
+}
+.tgs-btn:hover:not([disabled]) { background: rgba(140, 160, 195, 0.32); }
+.tgs-btn[disabled] { opacity: 0.5; cursor: default; }
+.tgs-btn[data-state="follow"] {
+  color: #a9d6ff; background: rgba(64, 140, 220, 0.2);
+  border-color: rgba(110, 180, 240, 0.6);
+}
+.tgs-btn[data-state="dirty"] {
+  color: #ffd98a; background: rgba(214, 158, 46, 0.22);
+  border-color: rgba(230, 180, 80, 0.72);
+}
+.tgs-btn[data-state="armed"] {
+  color: #ffe9bd; background: rgba(214, 138, 46, 0.4);
+  border-color: rgba(240, 178, 78, 0.95);
+}
+.tgs-btn[data-state="error"] {
+  color: #ffb4b4; background: rgba(214, 74, 74, 0.2);
+  border-color: rgba(240, 120, 120, 0.72);
+}
+.tgs-btn[data-state="busy"] {
+  color: #c3cbd9; background: rgba(120, 130, 150, 0.18);
+  border-color: rgba(160, 170, 190, 0.4);
+}
+.tgs-btn[data-state="void"] {
+  color: #c9b4b4; background: rgba(160, 90, 90, 0.14);
+  border-color: rgba(190, 110, 110, 0.5);
+}
+.tgs-status {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: rgba(200, 210, 230, 0.72);
+}
+.tgs-status[data-tone="info"] { color: #9fc8f2; }
+.tgs-status[data-tone="warn"] { color: #ffcf7a; }
+.tgs-status[data-tone="error"] { color: #ff9b9b; }
+
+/* 上游只读预览 */
+.tgs-up {
+  display: flex; flex-direction: column; gap: 2px; height: 100%;
+  box-sizing: border-box; padding: 3px 6px 4px;
+  border-radius: 6px; border-left: 3px solid rgba(150, 165, 195, 0.4);
+  background: rgba(0, 0, 0, 0.2);
+}
+.tgs-up[data-mode="follow"] { border-left-color: rgba(110, 180, 240, 0.85); }
+.tgs-up[data-mode="snapshot"] { border-left-color: rgba(150, 165, 195, 0.35); }
+.tgs-up[data-mode="void"] { border-left-color: rgba(190, 110, 110, 0.6); }
+.tgs-up[data-blocked="1"] { border-left-color: rgba(230, 180, 80, 0.95); }
+.tgs-up-head {
+  flex: 0 0 auto; font-size: 10px; line-height: 12px;
+  color: rgba(170, 185, 210, 0.75); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tgs-up-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  font-size: 11px; line-height: 15px; white-space: pre-wrap; word-break: break-word;
+  color: rgba(205, 215, 235, 0.9); user-select: text; cursor: text;
+}
+.tgs-up-body[data-empty="1"] { color: rgba(170, 185, 210, 0.5); font-style: italic; }
+
+/* 片段区 */
+.tgs-panel {
+  display: flex; flex-direction: column; gap: 6px; height: 100%;
+  box-sizing: border-box; padding: 6px; border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.tgs-chips-bar { display: flex; gap: 6px; flex: 0 0 auto; align-items: center; }
+.tgs-mini {
+  font-size: 11px; padding: 1px 8px; border-radius: 6px; cursor: pointer;
+  border: 1px solid rgba(150, 165, 195, 0.45); background: rgba(0, 0, 0, 0.2);
+  color: rgba(215, 225, 240, 0.9);
+}
+.tgs-mini:hover { background: rgba(140, 160, 195, 0.3); }
+.tgs-count {
+  font-size: 11px; margin-left: auto; opacity: 0.75;
+  font-variant-numeric: tabular-nums; color: rgba(205, 215, 235, 0.85);
+}
+.tgs-count[data-off="1"] { color: #ff9b9b; }
+.tgs-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; padding: 2px;
+}
+.tgs-chip {
+  display: inline-flex; align-items: center;
+  font-size: 12px; line-height: 17px; padding: 2px 6px 2px 9px; border-radius: 11px;
+  cursor: pointer; max-width: 100%; white-space: normal; word-break: break-word;
+  text-align: left; border: 1px solid transparent; font-weight: 500;
+  transition: filter 0.12s ease, transform 0.08s ease;
+  font-family: inherit;
+}
+.tgs-chip:hover { filter: brightness(1.35); }
+.tgs-chip:active { transform: scale(0.96); }
+.tgs-chip.on { background: rgba(46, 160, 67, 0.22); border-color: rgba(74, 222, 128, 0.75); color: #86efac; }
+.tgs-chip.off { background: rgba(248, 81, 73, 0.15); border-color: rgba(248, 81, 73, 0.55); color: #fca5a5; }
+/* 词右边的删除键：一道淡竖线隔开 */
+.tgs-chip-del {
+  position: relative; flex: 0 0 auto; padding: 0 2px 0 8px; margin-left: 2px;
+  font-size: 12px; line-height: 13px; cursor: pointer; opacity: 0.8; font-weight: 700;
+  align-self: stretch; display: flex; align-items: center;
+}
+.tgs-chip-del::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px;
+  background: currentColor; opacity: 0.55;
+}
+.tgs-chip-del:hover { opacity: 1; color: #ff9b9b; }
+.tgs-chip-del:hover::before { opacity: 0.6; }
+.tgs-mini[data-undo="1"] {
+  display: none;
+  border-color: rgba(255, 190, 90, 0.6);
+  background: rgba(255, 180, 60, 0.16);
+  color: #ffd08a;
+}
+.tgs-hint { font-size: 11px; opacity: 0.55; padding: 4px 2px; color: rgba(205, 215, 235, 0.9); }
+`;
+  document.head.append(css);
+}
+
+// ------------------------------------------------------------------ 小工具
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function textWidget(node) {
+  return (node.widgets || []).find((w) => w && w.name === "text");
+}
+
+function hasSource(node) {
+  const inp = (node.inputs || []).find((i) => i && i.name === "source");
+  return !!inp && inp.link != null;
+}
+
+function sourceText(node) {
+  const w = textWidget(node);
+  return w ? String(w.value ?? "") : "";
+}
+
+function stamp() {
+  const d = new Date();
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, "0"))
+    .join(":");
+}
+
+// follow = 框空且有上游（闸门开）；void = 框空且没上游；snapshot = 框里有字（闸门关）
+function modeOf(node) {
+  if (sourceText(node).trim()) return "snapshot";
+  return hasSource(node) ? "follow" : "void";
+}
+
+// ------------------------------------------------------------------ 片段开关状态
+
+function readMask(node) {
+  const st = node.__tgs;
+  if (st && Array.isArray(st.mask) && st.mask.length) return st.mask;
+  try {
+    const v = JSON.parse(node.properties?.tgs_mask || "[]");
+    return Array.isArray(v) ? v.map((x) => (x ? 1 : 0)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeMask(node, arr) {
+  const st = node.__tgs;
+  if (st) st.mask = arr;
+  node.properties = node.properties || {};
+  node.properties.tgs_mask = JSON.stringify(arr);
+  app.graph?.change?.(); // 标脏，关窗口前会提示保存
+}
+
+// 文本变了以后，按「文字 + 出现次序」把旧的开关状态接过去（与 PromptToggle 同一套）
+function reconcile(prevSegs, prevMask, segs) {
+  const pool = new Map();
+  prevSegs.forEach((s, i) => {
+    if (!pool.has(s)) pool.set(s, []);
+    pool.get(s).push(prevMask[i] ?? 1);
+  });
+  return segs.map((s) => {
+    const q = pool.get(s);
+    return q && q.length ? q.shift() : 1;
+  });
+}
+
+function maskOn(mask, i) {
+  return mask[i] !== 0;
+}
+
+// ------------------------------------------------------------------ 上游预览
+
+function updatePreview(node) {
+  const st = node.__tgs;
+  if (!st || !st.upBody) return;
+
+  const mode = modeOf(node);
+  const linked = hasSource(node);
+  let head;
+  let body;
+  let empty = "0";
+
+  if (!linked) {
+    head = "上游 · 未接线";
+    body = "左边 source 没连，本节点只能手写。";
+    empty = "1";
+    st.upEl.dataset.blocked = "";
+  } else if (st.upSrc == null) {
+    head = "上游 · 还没执行过";
+    body = "排一次队（或点 ✎ 放入上游），这里就会显示上游给了什么。";
+    empty = "1";
+    st.upEl.dataset.blocked = "";
+  } else {
+    const len = st.upSrc.length;
+    const blocked = mode === "snapshot" && !!st.blocked;
+    head = `上游 · 上次执行 ${st.upAt || ""} · ${len} 字`
+      + (mode === "follow" ? " · 闸门开着" : blocked ? " · 被闸门拦下" : "");
+    body = len > UP_CHARS ? st.upSrc.slice(0, UP_CHARS) + `\n…（共 ${len} 字，其余未渲染）` : st.upSrc;
+    if (!st.upSrc.trim()) {
+      body = "（上游这次是空的）";
+      empty = "1";
+    }
+    st.upEl.dataset.blocked = blocked ? "1" : "";
+  }
+
+  const sig = [mode, head, body, linked ? 1 : 0, st.blocked ? 1 : 0].join("|");
+  if (st.upSig === sig) return;
+  st.upSig = sig;
+
+  st.upEl.dataset.mode = mode;
+  st.upHead.textContent = head;
+  st.upBody.textContent = body;
+  st.upBody.dataset.empty = empty;
+  st.upBody.scrollTop = 0;
+}
+
+// ------------------------------------------------------------------ 片段渲染
+
+function renderChips(node) {
+  const st = node.__tgs;
+  if (!st || !st.list) return;
+  const { segs, mask } = st;
+
+  if (st.countEl) {
+    const on = segs.reduce((n, _, i) => n + (maskOn(mask, i) ? 1 : 0), 0);
+    st.countEl.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
+    st.countEl.dataset.off = segs.length && on === 0 ? "1" : "";
+  }
+
+  if (!segs.length) {
+    const hint = document.createElement("div");
+    hint.className = "tgs-hint";
+    hint.textContent = "框里有字后，这里会按标点炸成可点的片段（点一下关掉/打开）";
+    st.list.replaceChildren(hint);
+    return;
+  }
+
+  const chips = segs.map((seg, i) => {
+    const on = maskOn(mask, i);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `tgs-chip ${on ? "on" : "off"}`;
+    b.title = (on ? "点击关掉这一段（不出现在输出里）" : "点击打开")
+      + "；右上角 × 从文本框里删掉这一段";
+    const label = document.createElement("span");
+    label.textContent = seg;
+    const del = document.createElement("span");
+    del.className = "tgs-chip-del";
+    del.textContent = "×";
+    del.title = "从文本框里彻底删掉这一段（可撤销）";
+    del.addEventListener("pointerdown", (e) => e.stopPropagation());
+    del.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      deleteSegment(node, i);
+    });
+    b.append(label, del);
+    b.addEventListener("pointerdown", (e) => e.stopPropagation());
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      st.mask[i] = st.mask[i] ? 0 : 1;
+      writeMask(node, st.mask);
+      cancelFlash(node);
+      renderChips(node);
+      render(node);
+    });
+    return b;
+  });
+  st.list.replaceChildren(...chips);
+}
+
+// ------------------------------------------------------------------ 删除片段（×）
+// 绿/红 = 这一轮用不用；× = 真从文本框里抽走，抽完给一次撤销机会。
+
+function showUndo(node) {
+  const st = node.__tgs;
+  if (!st?.undoBtn || !st.undo) return;
+  st.undoBtn.style.display = "inline-block";  // 不能置空：CSS 里默认是 display:none
+  clearTimeout(st.undoTimer);
+  st.undoTimer = setTimeout(() => {
+    st.undoBtn.style.display = "none";
+    st.undo = null;
+  }, 10000);
+}
+
+async function deleteSegment(node, index) {
+  const st = node.__tgs;
+  if (!st?.segs || index < 0 || index >= st.segs.length) return;
+  const w = textWidget(node);
+  const text = String(w?.value ?? "");
+  try {
+    // 新文本由服务端算（它手里有原标点），前端只管写回
+    const res = await api.fetchApi(
+      `/prompt_toggle/split?text=${encodeURIComponent(text)}&drop=${index}`,
+      { cache: "no-store" },
+    );
+    const data = await res.json();
+    if (typeof data.text !== "string" || data.text === text) return;
+    st.undo = { text, segs: st.segs.slice(), mask: (st.mask || []).slice() };
+    w.value = data.text;
+    w.callback?.(data.text); // 走原有回调 -> 重新拆分 + reconcile
+    node.setDirtyCanvas?.(true, true);
+    app.canvas.setDirty(true, true);
+    showUndo(node);
+  } catch (e) {
+    console.warn("[TextGateSplit] 删除片段失败：", e);
+  }
+}
+
+function undoDelete(node) {
+  const st = node.__tgs;
+  if (!st?.undo) return;
+  const { text, segs, mask } = st.undo;
+  st.undo = null;
+  clearTimeout(st.undoTimer);
+  if (st.undoBtn) st.undoBtn.style.display = "none";
+  st.segs = segs.slice();
+  st.mask = mask.slice();
+  writeMask(node, st.mask);
+  const w = textWidget(node);
+  if (w) {
+    w.value = text;
+    w.callback?.(text);
+  }
+  renderChips(node);
+  render(node);
+  node.setDirtyCanvas?.(true, true);
+  app.canvas.setDirty(true, true);
+}
+
+// ------------------------------------------------------------------ 分段请求（与 PromptToggle 同一个后端逻辑）
+
+function scheduleSplit(node) {
+  const st = node.__tgs;
+  if (!st) return;
+  clearTimeout(st.splitTimer);
+  st.splitTimer = setTimeout(() => refreshSegments(node), 180);
+}
+
+async function refreshSegments(node) {
+  const st = node.__tgs;
+  if (!st) return;
+  const text = sourceText(node);
+  const seq = ++st.seq;
+  try {
+    const res = await api.fetchApi(`/prompt_toggle/split?text=${encodeURIComponent(text)}`);
+    const data = await res.json();
+    if (seq !== st.seq) return; // 又改了，这次结果作废
+    const segs = data.segments || [];
+    // 刚载入工作流时 st.segs 还是空的，没法按文字对号入座 -> 直接按位置沿用存档
+    const mask =
+      st.segs.length === 0 && st.mask.length === segs.length
+        ? st.mask.slice()
+        : reconcile(st.segs, st.mask, segs);
+    st.segs = segs;
+    st.mask = mask.length === segs.length ? mask : segs.map(() => 1);
+    writeMask(node, st.mask);
+    renderChips(node);
+    render(node);
+  } catch (e) {
+    console.warn("[TextGateSplit] 拆分失败：", e);
+  }
+}
+
+// ------------------------------------------------------------------ 状态条
+
+function render(node) {
+  const st = node.__tgs;
+  if (!st || !st.btn) return;
+
+  const mode = modeOf(node);
+  st.dirty = mode === "snapshot" && st.baseline != null && sourceText(node) !== st.baseline;
+  const segs = st.segs || [];
+  const onCount = segs.reduce((n, _, i) => n + (maskOn(st.mask, i) ? 1 : 0), 0);
+  st.allOff = segs.length > 0 && onCount === 0;
+
+  let state = "snapshot";
+  let label = "✎ 换成最新上游";
+  if (st.busy) {
+    state = "busy";
+    label = "✎ 放入中…";
+  } else if (st.error) {
+    state = "error";
+    label = "⚠ 失败，点此重试";
+  } else if (mode === "void") {
+    state = "void";
+    label = "✎ 未接上游";
+  } else if (mode === "follow") {
+    state = "follow";
+    label = "✎ 放入上游";
+  } else if (st.armed === "pull") {
+    state = "armed";
+    label = "⚠ 再点一次覆盖";
+  } else if (st.dirty) {
+    state = "dirty";
+    label = "✎ 覆盖改动";
+  }
+
+  let note;
+  let tone = "";
+  if (st.busy) {
+    note = "放入中…（只跑本节点和上游）";
+  } else if (st.error) {
+    note = st.error;
+    tone = "error";
+  } else if (mode === "void") {
+    note = "空：没上游也没内容";
+    tone = "error";
+  } else if (mode === "follow") {
+    note = "闸门开着 · 下次执行上游会整段流进来";
+    tone = "info";
+  } else if (st.allOff) {
+    note = "⚠ 片段全关，本次输出为空";
+    tone = "error";
+  } else if (st.blocked) {
+    note = "闸门关 · 上游被拦下（点 ✎ 放入）";
+    tone = "warn";
+  } else if (st.dirty) {
+    note = (st.at ? "闸门关（已手改）" : "闸门关（手写）") + " · 点 ✕ 重新开闸";
+    tone = "warn";
+  } else if (st.at) {
+    note = `闸门关 · ${st.at} 放入 · 开 ${onCount}/${segs.length} 段`;
+  } else {
+    note = "闸门关（手写） · 点 ✕ 重新开闸";
+  }
+  if (!st.busy && !st.error && st.flash) {
+    note = st.flash.text;
+    tone = st.flash.tone || "";
+  }
+
+  const showClear = mode === "snapshot";
+  const clearArmed = st.armed === "clear";
+
+  const sig = [state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0, st.busy ? 1 : 0].join("|");
+  if (st.sig === sig) {
+    updatePreview(node);
+    return;
+  }
+  st.sig = sig;
+
+  st.btn.dataset.state = state;
+  st.btn.disabled = !!st.busy || mode === "void";
+  st.btn.textContent = label;
+  st.btn.title =
+    (st.error ? st.error + "\n\n" : "") +
+    "把上游放进框里：只执行本节点和它的上游（其他分支不动），上游没变时走缓存，基本瞬发。\n" +
+    "框空着时不用点它——下次执行上游会自己流进来。";
+
+  if (st.clearBtn) {
+    st.clearBtn.style.display = showClear ? "" : "none";
+    st.clearBtn.dataset.armed = clearArmed ? "1" : "";
+    st.clearBtn.title = clearArmed
+      ? "再点一次：清空框，重新开闸（下次执行上游会流进来）"
+      : "清空框，重新开闸";
+    st.clearBtn.disabled = !!st.busy;
+  }
+
+  st.status.textContent = note;
+  st.status.dataset.tone = tone;
+  updatePreview(node);
+}
+
+// ------------------------------------------------------------------ 提示
+
+function flash(node, text, tone = "", ms = 3500) {
+  const st = node.__tgs;
+  if (!st) return;
+  st.flash = { text, tone };
+  clearTimeout(st.flashTimer);
+  st.flashTimer = setTimeout(() => {
+    const s2 = node.__tgs;
+    if (!s2) return;
+    s2.flash = null;
+    render(node);
+  }, ms);
+  render(node);
+}
+
+function cancelFlash(node) {
+  const st = node.__tgs;
+  if (!st) return;
+  clearTimeout(st.flashTimer);
+  st.flash = null;
+}
+
+function arm(node, kind) {
+  const st = node.__tgs;
+  if (!st) return;
+  cancelFlash(node);
+  st.armed = kind;
+  clearTimeout(st.armTimer);
+  st.armTimer = setTimeout(() => {
+    const s2 = node.__tgs;
+    if (!s2) return;
+    s2.armed = null;
+    render(node);
+  }, ARM_MS);
+  render(node);
+}
+
+// ------------------------------------------------------------------ 写入 / 开闸
+
+function applyInflow(node, raw, count, why) {
+  const st = node.__tgs;
+  const w = textWidget(node);
+  if (!st || !w) return;
+  w.value = raw;
+  st.baseline = raw;
+  st.dirty = false;
+  st.blocked = false;
+  st.armed = null;
+  st.at = stamp();
+  clearTimeout(st.armTimer);
+  node.setDirtyCanvas?.(true, true);
+  app.graph?.change?.();
+  refreshSegments(node); // 新词进来 -> 按文字接续旧的片段开关
+  render(node);
+  if (!raw.trim()) return;
+  flash(node, why === "auto"
+    ? `上游 ${raw.length} 字已流入框内，可直接改`
+    : `已放入上游 ${raw.length} 字`, "info", 3500);
+}
+
+function clearBox(node) {
+  const st = node.__tgs;
+  const w = textWidget(node);
+  if (!st || !w) return;
+  w.value = "";
+  st.baseline = "";
+  st.dirty = false;
+  st.blocked = false;
+  st.armed = null;
+  st.at = "";
+  st.flash = null;
+  node.setDirtyCanvas?.(true, true);
+  app.graph?.change?.();
+  refreshSegments(node);
+  render(node);
+  flash(node, "已开闸 · 下次执行上游会流进来", "info", 3000);
+}
+
+function onClearClick(node) {
+  const st = node.__tgs;
+  if (!st || st.busy || modeOf(node) !== "snapshot") return;
+  cancelFlash(node);
+  if (st.dirty && st.armed !== "clear") {
+    arm(node, "clear");
+    return;
+  }
+  clearBox(node);
+}
+
+// ------------------------------------------------------------------ 放入上游（局部执行）
+
+async function pull(node) {
+  const st = node.__tgs;
+  if (!st || st.busy || node.id == null || node.id < 0) return;
+
+  st.busy = true;
+  st.armed = null;
+  st.error = "";
+  st.flash = null;
+  st.pending = true;
+  render(node);
+
+  let queued = false;
+  let lastError = "";
+  for (let i = 0; i < RETRY_MAX; i++) {
+    try {
+      const ok = await app.queuePrompt(0, 1, { queueNodeIds: [String(node.id)] });
+      if (ok !== false) {
+        queued = true;
+        break;
+      }
+      if (!app.processingQueue) {
+        lastError = "ComfyUI 拒绝了这次执行（看控制台 / 错误面板）";
+        break;
+      }
+    } catch (e) {
+      lastError = String(e?.message || e);
+      break;
+    }
+    await sleep(RETRY_MS);
+  }
+
+  if (!queued) {
+    st.pending = false;
+    st.busy = false;
+    st.error = lastError || "队列正忙，稍后再点";
+    render(node);
+    return;
+  }
+
+  clearTimeout(st.waitTimer);
+  st.waitTimer = setTimeout(() => {
+    const s2 = node.__tgs;
+    if (!s2 || !s2.pending) return;
+    s2.pending = false;
+    s2.busy = false;
+    s2.error = "等后端回填超时（看 ComfyUI 控制台）";
+    render(node);
+  }, WAIT_MS);
+}
+
+function onMainClick(node) {
+  const st = node.__tgs;
+  if (!st || st.busy) return;
+  cancelFlash(node);
+
+  const mode = modeOf(node);
+  if (mode === "void") {
+    st.error = "左边 source 没接线，先接上";
+    render(node);
+    return;
+  }
+  if (mode === "snapshot" && st.dirty && st.armed !== "pull") {
+    arm(node, "pull");
+    return;
+  }
+  pull(node);
+}
+
+// ------------------------------------------------------------------ mask 注入
+
+let injectionInstalled = false;
+
+function installPromptInjection() {
+  if (injectionInstalled) return;
+  injectionInstalled = true;
+  const orig = app.graphToPrompt.bind(app);
+  app.graphToPrompt = async function (...args) {
+    const res = await orig(...args);
+    const out = res?.output || {};
+    for (const node of app.graph?._nodes || []) {
+      if (node?.type !== NODE_TYPE || !node.__tgs) continue;
+      const entry = out[String(node.id)];
+      if (entry?.inputs) entry.inputs.mask = JSON.stringify(node.__tgs.mask || []);
+    }
+    return res;
+  };
+}
+
+// ------------------------------------------------------------------ 节点装配
+
+function setupNode(node) {
+  if (node.__tgs) return;
+  ensureStyle();
+  installPromptInjection();
+
+  const st = (node.__tgs = {
+    btn: null, clearBtn: null, status: null,
+    upEl: null, upHead: null, upBody: null,
+    panel: null, list: null, count: null,
+    segs: [], mask: [], seq: 0,
+    baseline: sourceText(node),
+    dirty: false, armed: null, busy: false, pending: false,
+    error: "", at: "", count: 0, blocked: false, allOff: false,
+    upSrc: null, upAt: "", upSig: "",
+    flash: null, sig: "", splitTimer: null,
+  });
+
+  // mask 是纯状态，不该占一行界面：先把老值搬进 properties，再把控件摘掉
+  const maskIdx = (node.widgets || []).findIndex((w) => w && w.name === "mask");
+  if (maskIdx >= 0) {
+    const legacy = node.widgets[maskIdx];
+    if (legacy?.value && !node.properties?.tgs_mask) {
+      node.properties = node.properties || {};
+      node.properties.tgs_mask = String(legacy.value);
+    }
+    node.widgets.splice(maskIdx, 1);
+  }
+  st.mask = readMask(node);
+
+  // 编辑框固定高度，剩余空间给片段区
+  const textW = textWidget(node);
+  if (textW) {
+    textW.computeSize = (width) => [width ?? 300, st.textH ?? TEXT_MIN];
+    const cb = textW.callback;
+    textW.callback = function (...args) {
+      const r = cb?.apply(this, args);
+      cancelFlash(node);
+      scheduleSplit(node);
+      render(node);
+      return r;
+    };
+  }
+
+  // ---- 上游预览条
+  const upEl = document.createElement("div");
+  upEl.className = "tgs-up";
+  upEl.dataset.mode = "follow";
+  upEl.addEventListener("pointerdown", (e) => e.stopPropagation());
+  upEl.addEventListener("mousedown", (e) => e.stopPropagation());
+  const upHead = document.createElement("div");
+  upHead.className = "tgs-up-head";
+  const upBody = document.createElement("div");
+  upBody.className = "tgs-up-body";
+  upEl.append(upHead, upBody);
+  st.upEl = upEl; st.upHead = upHead; st.upBody = upBody;
+  const upWidget = node.addDOMWidget("tgs_up", "tgs_up", upEl, { serialize: false });
+  upWidget.serialize = false;
+  upWidget.computeSize = (width) => [width ?? 300, UP_H + 16];
+
+  // ---- 片段区
+  const panel = document.createElement("div");
+  panel.className = "tgs-panel";
+  panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+  const bar = document.createElement("div");
+  bar.className = "tgs-chips-bar";
+  const mk = (label, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tgs-mini";
+    b.textContent = label;
+    b.addEventListener("pointerdown", (e) => e.stopPropagation());
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      fn();
+    });
+    return b;
+  };
+  const countEl = document.createElement("span");
+  countEl.className = "tgs-count";
+  // 删除后的撤销入口：平时 display:none，点 × 之后出现 10 秒
+  const undoBtn = mk("撤销删除", () => undoDelete(node));
+  undoBtn.dataset.undo = "1";
+  undoBtn.title = "把刚删掉的那一段放回文本框（10 秒内有效）";
+  bar.append(
+    mk("全开", () => { st.mask = st.segs.map(() => 1); writeMask(node, st.mask); renderChips(node); render(node); }),
+    mk("全关", () => { st.mask = st.segs.map(() => 0); writeMask(node, st.mask); renderChips(node); render(node); }),
+    mk("反选", () => { st.mask = st.mask.map((m) => (m ? 0 : 1)); writeMask(node, st.mask); renderChips(node); render(node); }),
+    undoBtn,
+    countEl
+  );
+  const list = document.createElement("div");
+  list.className = "tgs-list";
+  panel.append(bar, list);
+  st.panel = panel; st.list = list; st.countEl = countEl; st.undoBtn = undoBtn;
+  const chipsWidget = node.addDOMWidget("tgs_chips", "tgs_chips", panel, { serialize: false });
+  chipsWidget.serialize = false;
+  chipsWidget.computeSize = (width) => [width ?? 300, CHIPS_H + 16];
+  st.chipsWidget = chipsWidget;
+
+  // ---- 状态条
+  const sbar = document.createElement("div");
+  sbar.className = "tgs-bar";
+  sbar.addEventListener("pointerdown", (e) => e.stopPropagation());
+  sbar.addEventListener("mousedown", (e) => e.stopPropagation());
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tgs-btn";
+  btn.textContent = "✎ 放入上游";
+  btn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onMainClick(node);
+  });
+
+  const clearBtn = document.createElement("button");
+  clearBtn.type = "button";
+  clearBtn.className = "tgs-btn";
+  clearBtn.textContent = "✕";
+  clearBtn.style.padding = "0 7px";
+  clearBtn.style.display = "none";
+  clearBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  clearBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClearClick(node);
+  });
+
+  const status = document.createElement("span");
+  status.className = "tgs-status";
+  sbar.append(btn, clearBtn, status);
+  st.btn = btn; st.clearBtn = clearBtn; st.status = status;
+
+  const barWidget = node.addDOMWidget("tgs_bar", "tgs_bar", sbar, { serialize: false });
+  barWidget.serialize = false;
+  barWidget.computeSize = (width) => [width ?? 300, BAR_H + 16];
+
+  if (node.size && node.size[1] < MIN_NODE_H) {
+    node.size = [Math.max(node.size[0] || 300, 360), DEFAULT_H];
+  }
+
+  // 关键：node.computeSize() 是「最小高度」。若它等于当前控件高度之和（≈当前高度），
+  // 节点就只能变高、缩不回去（每缩一点，最小高度又跟着降到新高度）。
+  // 钉成常数，控件高度由 layout() 按实际节点高度分配。
+  const baseComputeSize = node.computeSize.bind(node);
+  node.computeSize = function (out) {
+    const s = baseComputeSize(out);
+    return [s[0], MIN_NODE_H];
+  };
+
+  const onConnectionsChange = node.onConnectionsChange;
+  node.onConnectionsChange = function (type, index, connected, linkInfo) {
+    const r = onConnectionsChange?.apply(this, arguments);
+    render(this);
+    return r;
+  };
+
+  // 拉高/压矮节点：把多出来的高度优先给片段区，其次给编辑框（预览条与状态条不动）
+  const onResize = node.onResize;
+  node.onResize = function () {
+    const r = onResize?.apply(this, arguments);
+    layout(this);
+    return r;
+  };
+
+  const onConfigure = node.onConfigure;
+  node.onConfigure = function () {
+    const r = onConfigure?.apply(this, arguments);
+    const s = this.__tgs;
+    if (s) {
+      s.mask = readMask(this);
+      s.segs = []; // 让 refreshSegments 走「按存档位置沿用」那条路
+      s.baseline = sourceText(this);
+      s.dirty = false;
+      s.blocked = false;
+      s.armed = null;
+      s.error = "";
+      s.at = "";
+      s.count = 0;
+      s.flash = null;
+      s.upSrc = null;
+      s.upAt = "";
+      s.upSig = "";
+      s.sig = "";
+      refreshSegments(this);
+      render(this);
+    }
+    return r;
+  };
+
+  ensurePoll();
+  layout(node);
+  refreshSegments(node);
+  render(node);
+}
+
+// 版面分配：budget = 节点高度 - 固定部分，先给片段区（到 CHIPS_MAX），再给编辑框
+function layout(node) {
+  const st = node.__tgs;
+  const w = textWidget(node);
+  if (!st || !w || !st.chipsWidget || st.laying) return;
+
+  const H = node.size?.[1] || MIN_NODE_H;
+  const budget = H - FIXED_TOP - 16; // 片段区的 +16 内边距单独扣掉
+  const extra = Math.max(0, budget - TEXT_MIN - CHIPS_H);
+  const chipsGrow = Math.min(extra, Math.max(0, CHIPS_MAX - CHIPS_H));
+  const chips = CHIPS_H + chipsGrow;
+  const text = Math.min(TEXT_MAX, TEXT_MIN + (extra - chipsGrow));
+
+  if (chips === st.chipsH && text === st.textH) return;
+  st.chipsH = chips;
+  st.textH = text;
+
+  st.laying = true;
+  w.computeSize = (width) => [width ?? 300, text];
+  st.chipsWidget.computeSize = (width) => [width ?? 300, chips + 16];
+  const wrap = st.panel?.parentElement;
+  if (wrap && wrap !== document.body) wrap.style.height = `${chips}px`;
+
+  node.setDirtyCanvas?.(true, true);
+  setTimeout(() => {
+    const s2 = node.__tgs;
+    if (s2) s2.laying = false;
+  }, 60);
+}
+
+let pollTimer = null;
+function ensurePoll() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    for (const node of app.graph?._nodes || []) {
+      if (node?.type !== NODE_TYPE || !node.__tgs) continue;
+      layout(node);
+      render(node);
+    }
+  }, 400);
+}
+
+api.addEventListener("execution_error", () => {
+  for (const node of app.graph?._nodes || []) {
+    const st = node?.__tgs;
+    if (!st || !st.pending) continue;
+    st.pending = false;
+    st.busy = false;
+    clearTimeout(st.waitTimer);
+    st.error = "上游执行报错（看 ComfyUI 控制台）";
+    render(node);
+  }
+});
+
+app.registerExtension({
+  name: "StringMixer.TextGateSplit",
+  beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData?.name !== NODE_TYPE) return;
+
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const r = onNodeCreated?.apply(this, arguments);
+      setupNode(this);
+      return r;
+    };
+
+    const onExecuted = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function (message) {
+      const r = onExecuted?.apply(this, arguments);
+      const st = this.__tgs;
+      if (!st || !message || message.ts_source === undefined) return r;
+
+      const raw = String(message.ts_source[0] ?? "");
+      const count = Number((message.ts_count && message.ts_count[0]) ?? 0) || 0;
+      const used = !!(message.ts_used && message.ts_used[0]);
+      const blocked = !!(message.ts_blocked && message.ts_blocked[0]);
+      const allOff = !!(message.tgs_all_off && message.tgs_all_off[0]);
+
+      st.upSrc = raw;
+      st.upAt = stamp();
+
+      if (st.pending) {
+        st.pending = false;
+        st.busy = false;
+        st.armed = null;
+        st.error = "";
+        clearTimeout(st.waitTimer);
+        if (!(message.ts_linked && message.ts_linked[0])) {
+          st.error = "上游没接线";
+          render(this);
+          return r;
+        }
+        if (!raw.trim()) {
+          render(this);
+          flash(this, "上游这次是空的，闸门还开着", "warn", 3500);
+          return r;
+        }
+        applyInflow(this, raw, count, "manual");
+        return r;
+      }
+
+      cancelFlash(this);
+
+      if (used) {
+        if (!sourceText(this).trim() && raw.trim()) {
+          st.upSig = "";
+          applyInflow(this, raw, count, "auto");
+        } else {
+          render(this);
+        }
+      } else if (allOff) {
+        st.blocked = blocked;
+        flash(this, "⚠ 片段全关，本次输出为空", "error", 5000);
+      } else if (blocked) {
+        st.blocked = true;
+        flash(this, `⚠ 上游 ${raw.length} 字被闸门拦下（框里有你的内容）· 点 ✎ 放入`, "warn", 5000);
+      } else {
+        st.blocked = false;
+        render(this);
+      }
+      return r;
+    };
+  },
+
+  loadedGraphNode(node) {
+    if (node?.type !== NODE_TYPE) return;
+    setupNode(node);
+    render(node);
+  },
+});

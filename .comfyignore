@@ -1,0 +1,4 @@
+# 发布到 Comfy Registry 时排除的东西（语法同 .gitignore）
+# docs/ 故意保留：README 的截图就在里面，排掉会让文档变一堆碎图
+tools/
+.github/

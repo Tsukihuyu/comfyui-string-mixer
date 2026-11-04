@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# SkillPrompt 的 endpoint 配置（可能有地址/密钥）
+skillprompt.ini
+
+# 截图器的临时浏览器 profile
+tools/shots/.profile/

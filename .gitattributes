@@ -1,0 +1,5 @@
+# 统一换行：仓库里存 LF，检出时按平台转换；二进制不要碰
+text=auto
+
+*.png binary
+*.jpg binary
