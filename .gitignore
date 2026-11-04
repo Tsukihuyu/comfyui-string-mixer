@@ -6,3 +6,4 @@ skillprompt.ini
 
 # 截图器的临时浏览器 profile
 tools/shots/.profile/
+.verify/

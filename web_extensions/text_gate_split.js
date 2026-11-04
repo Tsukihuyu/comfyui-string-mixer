@@ -36,8 +36,13 @@ const TEXT_SLACK = 16;   // 框架给每个控件的固定开销：视觉高度 
 const UP_CHARS = 1200;   // 预览最多渲染多少字
 const DEFAULT_H = 470;   // 新建节点的高度
 const MIN_NODE_H = 416;  // 能缩到的最小高度（编辑框 2 行 + 片段 112 + 固定部分）
-// 节点里不归我们分配的部分（canvas 单位，实测）：标题 + join_mode + 预览条 + 状态条 + 间隙
-const FIXED_TOP = 26 + 24 + (UP_H + 16) + (BAR_H + 16) + 4 * 4 + 10;
+// 框架的账（实测，别凭感觉改）：
+//   * 每个 DOM 控件的 computedHeight = computeSize + 4，可见高度 = computedHeight − 20
+//     （上下各 10px 外边距），所以控件占用的纵向空间 = 可见高度 + 20
+//   * 控件区之外还有标题 26 + 底部留白 8
+// 版面分配必须跟这套账严格对上：只要多占 1px，_arrangeWidgets 就会每帧把节点加高一次。
+const WIDGET_OVERHEAD = 20;  // 单个 DOM 控件除可见高度外的固定占用
+const NODE_CHROME = 34;      // 标题 26 + 底部留白 8
 const RETRY_MS = 200;    // 队列忙时重试间隔
 const RETRY_MAX = 10;
 const ARM_MS = 5000;     // "再点一次"的确认态
@@ -1004,13 +1009,34 @@ function queueLayout(node) {
   st.layoutTimer = setTimeout(() => layout(node), 120);
 }
 
+// 除编辑框、片段区之外，其余控件（join_mode / 上游预览条 / 状态条）已经占掉的纵向空间
+//
+// 用 computeSize 而不是 computedHeight：后者要等第一次绘制才填上，
+// 节点刚创建时读不到就会算错账 —— 那一次错账足以让节点被迫长高一次。
+function widgetSlotH(w, width) {
+  if (typeof w.computeSize === "function") {
+    const s = w.computeSize(width);
+    if (Array.isArray(s) && isFinite(s[1])) return s[1] + 4; // 框架的 computedHeight = computeSize + 4
+  }
+  return w.computedHeight ?? 24;
+}
+
+function otherWidgetHeight(node, width) {
+  const st = node.__tgs;
+  let h = 0;
+  for (const w of node.widgets) {
+    if (!w || w === st.chipsWidget || w.name === "text") continue;
+    h += widgetSlotH(w, width);
+  }
+  return h;
+}
+
 function layout(node) {
   const st = node.__tgs;
   const w = textWidget(node);
   if (!st || !w || !st.chipsWidget || st.laying) return;
 
   const H = node.size?.[1] || MIN_NODE_H;
-  const budget = H - FIXED_TOP - 16; // 片段区的 +16 内边距单独扣掉
 
   const m = textMetrics(node);
   const lineH = m?.lineH || TEXT_LINE_H;
@@ -1020,9 +1046,12 @@ function layout(node) {
   const minText = TEXT_MIN_LINES * lineH + padV;
   const maxText = TEXT_MAX_LINES * lineH + padV;
   const want = Math.min(maxText, Math.max(minText, lines * lineH + padV));
-  // 片段区先保住最小高度，编辑框再退让；其余空间归片段区，不设上限
-  const text = Math.max(minText, Math.min(want, budget - CHIPS_H));
-  const chips = Math.max(CHIPS_H, budget - text);
+
+  // 版面必须严丝合缝：多占 1px，_arrangeWidgets 下一帧就会把节点加高（于是每帧都长一点）
+  const fixed = NODE_CHROME + otherWidgetHeight(node, node.size?.[0] ?? 400) + WIDGET_OVERHEAD * 2;
+  // 片段区先保住最小高度，编辑框再退让；其余空间全归片段区，不设上限
+  const text = Math.max(minText, Math.min(want, H - fixed - CHIPS_H));
+  const chips = Math.max(CHIPS_H, H - fixed - text);
 
   if (chips === st.chipsH && text === st.textH && lines === st.lines) return;
   st.chipsH = chips;
