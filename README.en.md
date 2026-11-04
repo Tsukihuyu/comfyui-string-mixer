@@ -38,7 +38,7 @@ git clone https://github.com/Tsukihuyu/comfyui-string-mixer comfyui-string-mixer
 | Node | What it does | When you'd reach for it |
 |---|---|---|
 | ⛩ **Text Gate** | Upstream text either passes through or gets replaced by yours | "The upstream text is fine except two words" |
-| ⛩ **Text Gate Toggle** | Gate + per-segment switches | "Use part of what upstream gave me" |
+| ⛩ **Text Gate Toggle** | Gate + per-segment switches (follows upstream until you touch it) | "Use part of what upstream gave me" |
 | 💥 **Prompt Toggle** | Split one sentence into chips, toggle each | "Is this word even doing anything?" |
 | 🧵 **Text Mix 3 / 5 / 7** | External input + N boxes, merged | "Keep quality, subject, outfit apart" |
 | 🧼 **Prompt Cleaner** | Strip bracket spam, duplicates, extra spaces | "Pasted from somewhere messy" |
@@ -75,20 +75,32 @@ output:   masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms
 
 ## ⛩ Text Gate Toggle
 
-![Text Gate Toggle](docs/images/02-gate-toggle.png)
+![Text Gate Toggle: untouched, following upstream](docs/images/02-gate-toggle.png)
+
+![Text Gate Toggle: segments off + manual lock](docs/images/02b-gate-locked.png)
 
 **The problem**: upstream gives a whole sentence; you want part of it this time, and maybe a different part next time.
 
-**Rules**:
+**The gate opens on "did you touch it", not on "is the box empty"**:
 
-- **Box empty** → upstream passes through untouched (no splitting, no re-punctuating).
-- **Box has text** → split on punctuation; all-on outputs the original text; with some off it re-joins per the join mode; **all-off outputs empty** and turns the counter red (so you never silently ship an empty prompt).
+- **Untouched** (no edits, no segments off, no lock) → every queue lets the new upstream in, and **this run's output is the new text**; the box refreshes with it. When upstream is an LLM writing fresh words each time, you never have to hit `✕` to re-open the gate.
+- **Touched** (edited text / switched segments off / hit 🔒) → upstream gets blocked, only the box is output, and the status bar names the reason (`关了词`, `字改过`, `手动锁`, `手写内容`).
+
+**Three details when untouched**:
+
+- All-off then all-on counts as **untouched** — only the final state matters.
+- Upstream gives nothing this run → **the old words stay**, with an explicit `上游这次是空的 · 旧词保留` note.
+- Workflows saved before this version (no `tgs_base` record) are treated as **locked** — your hand-written box is never overwritten.
+
+**🔒 Manual lock**: sometimes you just want to keep these words, without editing a character, and without them being replaced. One click locks; clicking again unlocks and accepts the current content as the new baseline.
+
+**Splitting** (when the box has text): split on punctuation; all-on outputs the original text; with some off it re-joins per the join mode; **all-off outputs empty** and turns the counter red (so you never silently ship an empty prompt).
 
 **Join modes**: `comma` re-joins with `", "`, `original` keeps the original punctuation.
 
-**Green/red and `×` are different things**: clicking a chip only says "use it this round" (the word stays). Clicking the `×` at the right edge **deletes that segment from the text box for real**, punctuation included. An `Undo delete` button appears for 10 seconds afterwards.
+**Green/red and `×` are different things**: clicking a chip only says "use it this round" (the word stays). Clicking the `×` at the right edge **deletes that segment from the text box for real**, punctuation included. An `Undo delete` button appears for 10 seconds afterwards. Deleting a segment counts as touching.
 
-**Why it's handy**: one click flips between "everything upstream gave me" and "the subset I picked". Off segments stay in place and turn red — **they are not deleted** — so switching one back on costs nothing.
+**Why it's handy**: one click flips between "everything upstream gave me" and "the subset I picked"; when you're done, `✕` or unlocking with 🔒 puts it back on follow. Off segments stay in place and turn red — **they are not deleted** — so switching one back on costs nothing.
 
 **Actual behaviour**: 10 segments, 3 off
 
@@ -241,6 +253,7 @@ One folder per rulebook; the dropdown shows the folder name. The bundled `skillp
 - **Node type names are stable** (`StringMixer`, `TextGateSplit`, …), so existing workflows keep loading. Only display names changed.
 - **Both gates are output nodes**: selecting one and hitting Queue runs just it and its upstream; the others run with whatever consumes them.
 - **State travels with the workflow**: text typed into a gate, which segments are off, camera parameters — all live in node properties and are saved in the workflow `.json`.
+- **The gate remembers whether you touched it**: the text it last absorbed lives in the `tgs_base` node property, so a page refresh or a reopened workflow still knows whether to follow upstream.
 - **Python changes need a restart; frontend changes need `Ctrl+Shift+R`.** If unsure, do both.
 - **The README images are real screenshots taken by a script**: `node tools/shots/shoot.mjs` re-shoots everything (ComfyUI on `127.0.0.1:8199`), or a single scene with `node tools/shots/shoot.mjs 02-gate-toggle`.
 
