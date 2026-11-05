@@ -45,6 +45,8 @@ const WIDGET_OVERHEAD = 20;  // 单个 DOM 控件除可见高度外的固定占�
 const NODE_CHROME = 34;      // 标题 26 + 底部留白 8
 const RETRY_MS = 200;    // 队列忙时重试间隔
 const RETRY_MAX = 10;
+const IDLE_POLL_MS = 800;                 // 挂起时多久探一次队列
+const IDLE_MAX_MS = 30 * 60 * 1000;       // 挂起兜底：半小时还没空就放弃
 const ARM_MS = 5000;     // "再点一次"的确认态
 const WAIT_MS = 300000;  // 等回填的兜底超时
 
@@ -541,7 +543,10 @@ function render(node) {
 
   let state = "snapshot";
   let label = "✎ 换成最新上游";
-  if (st.busy) {
+  if (st.waiting) {
+    state = "armed";
+    label = "⏳ 等队列空 · 点此取消";
+  } else if (st.busy) {
     state = "busy";
     label = "✎ 放入中…";
   } else if (st.error) {
@@ -563,7 +568,10 @@ function render(node) {
 
   let note;
   let tone = "";
-  if (st.busy) {
+  if (st.waiting) {
+    note = "队列正忙 · 这一轮跑完会自动放入";
+    tone = "warn";
+  } else if (st.busy) {
     note = "放入中…（只跑本节点和上游）";
   } else if (st.error) {
     note = st.error;
@@ -596,7 +604,7 @@ function render(node) {
   const clearArmed = st.armed === "clear";
 
   const sig = [state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0,
-    st.busy ? 1 : 0, gate.manualLock ? 1 : 0].join("|");
+    st.busy ? 1 : 0, st.waiting ? 1 : 0, gate.manualLock ? 1 : 0].join("|");
   if (st.sig === sig) {
     updatePreview(node);
     return;
@@ -604,7 +612,8 @@ function render(node) {
   st.sig = sig;
 
   st.btn.dataset.state = state;
-  st.btn.disabled = !!st.busy || mode === "void";
+  // 挂起的时候按钮要能点（点一下取消等待）
+  st.btn.disabled = (!!st.busy && !st.waiting) || mode === "void";
   st.btn.textContent = label;
   st.btn.title =
     (st.error ? st.error + "\n\n" : "") +
@@ -765,6 +774,59 @@ function onClearClick(node) {
 
 // ------------------------------------------------------------------ 放入上游（局部执行）
 
+// 队列是不是还在忙（跑着或排着）
+async function queueBusy() {
+  try {
+    const res = await fetch("/api/queue", { cache: "no-store" });
+    const q = await res.json();
+    return !!((q.queue_running || []).length + (q.queue_pending || []).length);
+  } catch {
+    return !!app.processingQueue;
+  }
+}
+
+// 队列忙的时候点“覆盖改动”：别硬失败，挂起等它空下来再补一次
+function startQueueWait(node) {
+  const st = node.__tgs;
+  if (!st) return;
+  st.waiting = true;
+  st.busy = true;      // 按钮这时是“点此取消”
+  st.pending = false;
+  st.error = "";
+  st.idleSince = Date.now();
+  clearInterval(st.idleTimer);
+  st.idleTimer = setInterval(async () => {
+    const s2 = node.__tgs;
+    if (!s2 || !s2.waiting || !app.graph?._nodes?.includes(node)) {
+      clearInterval(s2?.idleTimer);
+      return;
+    }
+    if (Date.now() - s2.idleSince > IDLE_MAX_MS) {
+      stopQueueWait(node, "等队列空太久了，先放弃了");
+      return;
+    }
+    if (await queueBusy()) return;
+    clearInterval(s2.idleTimer);
+    s2.idleTimer = null;
+    s2.waiting = false;
+    s2.busy = false;   // 让 pull 能进得去
+    pull(node);        // 队列空了，补这次放入
+  }, IDLE_POLL_MS);
+  render(node);
+}
+
+function stopQueueWait(node, why = "") {
+  const st = node.__tgs;
+  if (!st) return;
+  clearInterval(st.idleTimer);
+  st.idleTimer = null;
+  st.waiting = false;
+  st.busy = false;
+  st.pending = false;
+  if (why) st.error = why;
+  render(node);
+}
+
 async function pull(node) {
   const st = node.__tgs;
   if (!st || st.busy || node.id == null || node.id < 0) return;
@@ -778,6 +840,7 @@ async function pull(node) {
 
   let queued = false;
   let lastError = "";
+  let busySeen = false;
   for (let i = 0; i < RETRY_MAX; i++) {
     try {
       const ok = await app.queuePrompt(0, 1, { queueNodeIds: [String(node.id)] });
@@ -785,10 +848,11 @@ async function pull(node) {
         queued = true;
         break;
       }
-      if (!app.processingQueue) {
+      if (!app.processingQueue && !(await queueBusy())) {
         lastError = "ComfyUI 拒绝了这次执行（看控制台 / 错误面板）";
         break;
       }
+      busySeen = true;
     } catch (e) {
       lastError = String(e?.message || e);
       break;
@@ -797,6 +861,12 @@ async function pull(node) {
   }
 
   if (!queued) {
+    if (busySeen && !lastError) {
+      // 队列正忙：挂起等它空，空了自动补（不用人再点一次）
+      startQueueWait(node);
+      flash(node, "队列正忙 · 空下来会自动放入", "warn", 4000);
+      return;
+    }
     st.pending = false;
     st.busy = false;
     st.error = lastError || "队列正忙，稍后再点";
@@ -817,7 +887,13 @@ async function pull(node) {
 
 function onMainClick(node) {
   const st = node.__tgs;
-  if (!st || st.busy) return;
+  if (!st) return;
+  if (st.waiting) {                 // 挂起中再点 = 取消等待
+    stopQueueWait(node);
+    flash(node, "已取消等待队列", "info", 2500);
+    return;
+  }
+  if (st.busy) return;
   cancelFlash(node);
 
   const mode = modeOf(node);
@@ -871,6 +947,7 @@ function setupNode(node) {
     segs: [], mask: [], seq: 0,
     baseline: sourceText(node),
     dirty: false, armed: null, busy: false, pending: false,
+    waiting: false, idleTimer: null, idleSince: 0,
     error: "", at: "", count: 0, blocked: false, allOff: false,
     upSrc: null, upAt: "", upSig: "",
     flash: null, sig: "", splitTimer: null,

@@ -254,6 +254,7 @@ One folder per rulebook; the dropdown shows the folder name. The bundled `skillp
 - **Both gates are output nodes**: selecting one and hitting Queue runs just it and its upstream; the others run with whatever consumes them.
 - **State travels with the workflow**: text typed into a gate, which segments are off, camera parameters — all live in node properties and are saved in the workflow `.json`.
 - **The gate remembers whether you touched it**: the text it last absorbed lives in the `tgs_base` node property, so a page refresh or a reopened workflow still knows whether to follow upstream.
+- **Hitting `✎` while the queue is busy makes it wait**: the pull runs automatically when the current run finishes, no second click needed; while waiting the button reads `⏳ 等队列空 · 点此取消`.
 - **Python changes need a restart; frontend changes need `Ctrl+Shift+R`.** If unsure, do both.
 - **The README images are real screenshots taken by a script**: `node tools/shots/shoot.mjs` re-shoots everything (ComfyUI on `127.0.0.1:8199`), or a single scene with `node tools/shots/shoot.mjs 02-gate-toggle`.
 
