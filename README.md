@@ -16,8 +16,6 @@
 
 这是一个从实际使用需求出发，逐渐长出来的小工具集。希望它也能让你的 ComfyUI 工作流变得更顺手。
 
-![11 个节点](docs/images/12-family.png)
-
 English: [README.en.md](README.en.md)
 
 ---
