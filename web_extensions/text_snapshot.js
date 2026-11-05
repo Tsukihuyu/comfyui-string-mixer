@@ -38,8 +38,6 @@ const TEXT_MAX = 900;    // 编辑框最大高度
 const FIXED_TOP = 26 + (UP_H + 16) + (BAR_H + 16) + 2 * 4 + 10;
 const RETRY_MS = 200;    // 队列正在处理别的提交时的重试间隔
 const RETRY_MAX = 10;    // 重试次数上限（约 2 秒）
-const IDLE_POLL_MS = 800;            // 挂起时多久探一次队列
-const IDLE_MAX_MS = 30 * 60 * 1000;  // 挂起兜底：半小时还没空就放弃
 const ARM_MS = 5000;     // "再点一次"的确认态保持时间
 const WAIT_MS = 300000;  // 等后端回填的兜底超时（上游可能是 LLM，给 5 分钟）
 
@@ -232,10 +230,7 @@ function render(node) {
 
   let state = "snapshot";
   let label = "✎ 换成最新上游";
-  if (st.waiting) {
-    state = "armed";
-    label = "⏳ 等队列空 · 点此取消";
-  } else if (st.busy) {
+  if (st.busy) {
     state = "busy";
     label = "✎ 放入中…";
   } else if (st.error) {
@@ -257,10 +252,7 @@ function render(node) {
 
   let note;
   let tone = "";
-  if (st.waiting) {
-    note = "队列正忙 · 这一轮跑完会自动放入";
-    tone = "warn";
-  } else if (st.busy) {
+  if (st.busy) {
     note = "放入中…（只跑本节点和上游）";
   } else if (st.error) {
     note = st.error;
@@ -293,7 +285,6 @@ function render(node) {
 
   const sig = [
     state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0, st.busy ? 1 : 0,
-    st.waiting ? 1 : 0,
   ].join("|");
   if (st.sig === sig) {
     updatePreview(node);
@@ -302,8 +293,7 @@ function render(node) {
   st.sig = sig;
 
   st.btn.dataset.state = state;
-  // 挂起的时候按钮要能点（点一下取消等待）
-  st.btn.disabled = (!!st.busy && !st.waiting) || mode === "void";
+  st.btn.disabled = !!st.busy || mode === "void";
   st.btn.textContent = label;
   st.btn.title =
     (st.error ? st.error + "\n\n" : "") +
@@ -397,48 +387,6 @@ async function queueBusy() {
   }
 }
 
-// 队列忙的时候点“放入上游”：别硬失败，挂起等它空下来再补一次
-function startQueueWait(node) {
-  const st = node.__ts;
-  if (!st) return;
-  st.waiting = true;
-  st.busy = true;      // 按钮这时是“点此取消”
-  st.pending = false;
-  st.error = "";
-  st.idleSince = Date.now();
-  clearInterval(st.idleTimer);
-  st.idleTimer = setInterval(async () => {
-    const s2 = node.__ts;
-    if (!s2 || !s2.waiting || !app.graph?._nodes?.includes(node)) {
-      clearInterval(s2?.idleTimer);
-      return;
-    }
-    if (Date.now() - s2.idleSince > IDLE_MAX_MS) {
-      stopQueueWait(node, "等队列空太久了，先放弃了");
-      return;
-    }
-    if (await queueBusy()) return;
-    clearInterval(s2.idleTimer);
-    s2.idleTimer = null;
-    s2.waiting = false;
-    s2.busy = false;   // 让 pull 能进得去
-    pull(node);        // 队列空了，补这次放入
-  }, IDLE_POLL_MS);
-  render(node);
-}
-
-function stopQueueWait(node, why = "") {
-  const st = node.__ts;
-  if (!st) return;
-  clearInterval(st.idleTimer);
-  st.idleTimer = null;
-  st.waiting = false;
-  st.busy = false;
-  st.pending = false;
-  if (why) st.error = why;
-  render(node);
-}
-
 async function pull(node) {
   const st = node.__ts;
   if (!st || st.busy || node.id == null || node.id < 0) return;
@@ -474,15 +422,12 @@ async function pull(node) {
   }
 
   if (!queued) {
-    if (busySeen && !lastError) {
-      // 队列正忙：挂起等它空，空了自动补（不用人再点一次）
-      startQueueWait(node);
-      flash(node, "队列正忙 · 空下来会自动放入", "warn", 4000);
-      return;
-    }
     st.pending = false;
     st.busy = false;
-    st.error = lastError || "队列正忙，稍后再点";
+    // 不做排队/挂起：开闸是“执行上游”，得跟队列抢，干脆当场说清楚
+    st.error = busySeen
+      ? "前序任务还没跑完 · 稍后再试"
+      : (lastError || "ComfyUI 拒绝了这次执行");
     render(node);
     return;
   }
@@ -500,13 +445,7 @@ async function pull(node) {
 
 function onMainClick(node) {
   const st = node.__ts;
-  if (!st) return;
-  if (st.waiting) {                 // 挂起中再点 = 取消等待
-    stopQueueWait(node);
-    flash(node, "已取消等待队列", "info", 2500);
-    return;
-  }
-  if (st.busy) return;
+  if (!st || st.busy) return;
   cancelFlash(node);
 
   const mode = modeOf(node);
@@ -571,9 +510,6 @@ function setupNode(node) {
     armed: null, // null | "pull" | "clear"
     busy: false,
     pending: false,
-    waiting: false,      // 队列忙 -> 挂起等它空
-    idleTimer: null,
-    idleSince: 0,
     error: "",
     at: "",
     count: 0,
