@@ -246,8 +246,8 @@ _write("body.txt", "cat, dog")
 check("无 -> 正文原样", run(PFL, file="body.txt"), "cat, dog")
 check("MOSS -> 前<|style|>空格 + 正文 + 空格<|/style|>",
       run(PFL, file="body.txt", affix="MOSS"), "<|style|> cat, dog <|/style|>")
-check("Krea2 -> Style:(无空格) + 正文 + Subject:空格（Space 照抄你给的原文）",
-      run(PFL, file="body.txt", affix="Krea2"), "Style:cat, dogSubject: ")
+check("Krea2 -> 两个冒号后都有空格",
+      run(PFL, file="body.txt", affix="Krea2"), "Style: cat, dog Subject: ")
 check("自定义 -> 只有前缀", run(PFL, file="body.txt", affix="自定义", prefix="A "), "A cat, dog")
 check("自定义 -> 只有后缀", run(PFL, file="body.txt", affix="自定义", suffix=" B"), "cat, dog B")
 check("自定义 -> 前后缀都用", run(PFL, file="body.txt", affix="自定义", prefix="[", suffix="]"),

@@ -186,7 +186,7 @@ output: (best quality:1.21), masterpiece, (1girl:1.1), blue hair, (blurry:0.9), 
 |---|---|
 | 无 (none) | `cat, dog` |
 | MOSS | `<|style|> cat, dog <|/style|>` |
-| Krea2 | `Style:cat, dogSubject: ` |
+| Krea2 | `Style: cat, dog Subject: ` |
 | 自定义 (custom) | `prefix + cat, dog + suffix` — the `prefix` / `suffix` fields only appear in this mode, either can be left empty |
 
 Picking 「不读取文件」(read no file) outputs an empty string with no affixes, so you never get a pair of orphan tags.

@@ -17,7 +17,7 @@ NO_FILE = "（不读取文件）"  # 下拉列表里“一个文件都不读”�
 AFFIX_MODES = ("无", "MOSS", "Krea2", "自定义")
 AFFIX_TEMPLATES = {
     "MOSS": ("<|style|> ", " <|/style|>"),
-    "Krea2": ("Style:", "Subject: "),
+    "Krea2": ("Style: ", " Subject: "),
 }
 
 

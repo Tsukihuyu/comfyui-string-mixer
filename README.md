@@ -186,7 +186,7 @@ git clone <本仓库地址> comfyui-string-mixer
 |---|---|
 | 无 | `cat, dog` |
 | MOSS | `<|style|> cat, dog <|/style|>` |
-| Krea2 | `Style:cat, dogSubject: ` |
+| Krea2 | `Style: cat, dog Subject: ` |
 | 自定义 | `前缀 + cat, dog + 后缀`（选它才会出现 `prefix` / `suffix` 两个框，都可以留空） |
 
 选「（不读取文件）」时输出空串，前后缀也不加——不会给你一对孤立标签。
