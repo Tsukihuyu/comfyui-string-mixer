@@ -139,7 +139,7 @@ class TextGateSplit:
                 }),
                 "join_mode": (["comma", "original"], {
                     "default": "comma",
-                    "tooltip": "comma=关掉片段后用 ', ' 重拼；original=保留原本的标点",
+                    "tooltip": "comma=关掉片段后用 ', ' 重拼（冒号段两侧用空格）；original=保留原本的标点",
                 }),
             },
             "optional": {

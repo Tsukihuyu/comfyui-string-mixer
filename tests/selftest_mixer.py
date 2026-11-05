@@ -342,6 +342,34 @@ check("编辑框空 + 有上游 -> 只输出上游", run(PT, text="", upstream="
 check("上游为空不影响输出", run(PT, text="a, b", upstream="   "), "a, b")
 check("空文本 -> 空串", run(PT, text=""), "")
 
+# --- 冒号标签（Krea2 那种 Style: / Subject:）---
+split = mod.nodes.toggle.split_prompt_segments
+check("冒号段单独炸出来：Style:",
+      [b for b, _ in split("Style: anime, color")], ["Style:", "anime", "color"])
+check("冒号段单独炸出来：中文冒号",
+      [b for b, _ in split("风格：描写，光线")], ["风格：", "描写", "光线"])
+check("冒号后没空格也拆", [b for b, _ in split("Style:anime")], ["Style:", "anime"])
+check("3:4 比例不拆", [b for b, _ in split("ratio 3:4")], ["ratio 3:4"])
+check("裸权重 cat:1.5 不拆", [b for b, _ in split("cat:1.5, dog")], ["cat:1.5", "dog"])
+check("括号权重 (cat:1.2) 不拆", [b for b, _ in split("(cat:1.2), dog")], ["(cat:1.2)", "dog"])
+check("受保护块里的冒号不拆",
+      [b for b, _ in split("<|style|> a: b <|/style|>")], ["<|style|> a: b <|/style|>"])
+
+_KREA = "Style: anime, flat color Subject: 1girl"
+check("全开 = 原文，不重拼（两个炸词节点一致）",
+      mod.apply_toggle(_KREA, json.dumps([1, 1, 1, 1, 1])), _KREA)
+check("关掉最后一段：标签前用句点+空格",
+      mod.apply_toggle(_KREA, json.dumps([1, 1, 1, 1, 0])),
+      "Style: anime, flat color. Subject:")
+check("original 模式：原样还原",
+      mod.apply_toggle(_KREA, json.dumps([1, 1, 1, 1, 1]), "original"), _KREA)
+check("关掉 Subject: 之后剩的段用逗号接",
+      mod.apply_toggle(_KREA, json.dumps([1, 1, 1, 0, 1])),
+      "Style: anime, flat color, 1girl")
+check("关掉 Style: 之后不以空格开头",
+      mod.apply_toggle(_KREA, json.dumps([0, 1, 1, 1, 1])),
+      "anime, flat color. Subject: 1girl")
+...
 # --- 词片右上角的 × ：从文本里彻底删掉一段（drop_segment）
 drop = mod.nodes.toggle.drop_segment
 check("删中间一段（保留原标点）", drop("a, b, c, d", 2), "a, b, d")
@@ -350,6 +378,8 @@ check("删第一段不留开头逗号", drop("a, b, c", 0), "b, c")
 check("只剩一段时删光", drop("a", 0), "")
 check("越界 -> 原样返回", drop("a, b", 9), "a, b")
 check("换行也保留", drop("a\nb\nc", 1), "a\nc")
+check("删掉标签后面的词：标签前仍是句点", drop("Style: anime, flat color Subject: 1girl", 1),
+      "Style: flat color. Subject: 1girl")
 check("冒号不参与分段（3:4 不被切开）", drop("3:4, cat", 1), "3:4")
 check("删一段后重新拆分，片段数减一",
       [s for s, _ in mod.split_prompt_segments(drop("a, b, c", 1))], ["a", "c"])

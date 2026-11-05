@@ -96,7 +96,9 @@ output:   masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms
 
 **Splitting** (when the box has text): split on punctuation; all-on outputs the original text; with some off it re-joins per the join mode; **all-off outputs empty** and turns the counter red (so you never silently ship an empty prompt).
 
-**Join modes**: `comma` re-joins with `", "`, `original` keeps the original punctuation.
+**Join modes**: `comma` re-joins with `", "` (**a space around colon labels**, see below), `original` keeps the original punctuation.
+
+**Colon labels split out on their own**: words ending with a colon (`Style:`, `Subject:`) become their own segments with the colon kept. Joins put a space after a label and `period + space` before it (`… flat color. Subject: 1girl`); `original` mode still restores the source text. A colon followed by a digit is left alone (`3:4`, `cat:1.5`).
 
 **Green/red and `×` are different things**: clicking a chip only says "use it this round" (the word stays). Clicking the `×` at the right edge **deletes that segment from the text box for real**, punctuation included. An `Undo delete` button appears for 10 seconds afterwards. Deleting a segment counts as touching.
 
@@ -120,6 +122,8 @@ output: masterpiece, best quality, 1girl, kimono, cherry blossoms, smile, cinema
 **How it differs from Text Gate Toggle**: this node ignores upstream entirely — it's a plain word-splitter with switches. The upstream input is optional; when connected, it's prepended to your result (upstream verbatim, not affected by the switches).
 
 **Why it's handy**: no copy-paste into another tool to compare. Off words stay put, and turning them back on restores the original sentence. To really remove one, use the `×` at the right edge of the chip (undoable for 10 seconds).
+
+**Colon labels split out on their own**: words ending with a colon (`Style:`, `Subject:`, `风格：`) become their own chips with the colon kept. When joining, a label is followed by a **space** (it sticks to what it labels) and preceded by **a period plus a space** (it starts a new sentence instead of being folded into the previous comma list) — so a Krea2-style `Style: … Subject: …` survives toggling intact. A colon followed by a digit is left alone (`3:4`, `cat:1.5` weights/ratios), and so is anything inside parentheses or a `<|…|>` block.
 
 ```
 input:  masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms, smile, looking at viewer, shallow depth of field, cinematic light

@@ -11,14 +11,24 @@ from .textscan import _split_segments
 # PromptToggle -> Prompt Toggle：按标点把提示词拆成片段，逐段开关
 # ---------------------------------------------------------------------------
 
-# 拆分分隔符：中英文逗号、句号、分号、换行。刻意不含冒号（护住 3:4 与 (cat:1.2)）
+# 拆分分隔符：中英文逗号、句号、分号、换行
 SPLIT_CHARS = set(",，.。;；\n")
+# 冒号单独处理：只有“词尾冒号”才断开（Style: / 风格：），
+# 冒号后紧跟数字的是权重或比例（3:4、cat:1.5），原样留在词里。
+COLON_CHARS = (":", "：")
+COLON_TAILS = COLON_CHARS
+
+
+def is_colon_tail(body):
+    """这一段是不是“冒号标签”（以冒号结尾）。拼接时它两侧用空格，不用逗号。"""
+    return body.endswith(COLON_TAILS)
 
 
 def split_prompt_segments(text):
     """按标点拆片段，返回 [(片段, 它前面的分隔符), ...]。
 
     括号内（含权重 (cat:1.2)、嵌套括号）与 <|...|> 受保护块整块当一个片段，不拆。
+    以冒号结尾的词（Style: / 风格：）单独成段，冒号留在段里。
     片段去首尾空白，空片段丢弃。
     """
     if not text or not text.strip():
@@ -28,29 +38,65 @@ def split_prompt_segments(text):
     buf = []
     delim = ""
     depth = 0
+    after_colon = False  # 刚在冒号处断过：紧跟的空格归分隔符，original 模式才还原成 ": "
 
     for kind, payload in _split_segments(text):
         # 受保护块 / 独立 token：整块塞进当前片段，标点扫描跳过它
         if kind == "block":
             open_tok, inner, close_tok = payload
             buf.append(f"{open_tok}{inner}{close_tok}")
+            after_colon = False
             continue
         if kind == "token":
             buf.append(payload)
+            after_colon = False
             continue
 
-        for ch in payload:
+        for i, ch in enumerate(payload):
             if ch == "(":
                 depth += 1
             elif ch == ")":
                 depth = max(0, depth - 1)
+
             if depth == 0 and ch in SPLIT_CHARS:
+                # 小数点不是句号：1.5 / 0.9 / cat:1.5 里的点不拆
+                if (ch == "." and 0 < i < len(payload) - 1
+                        and payload[i - 1].isdigit() and payload[i + 1].isdigit()):
+                    buf.append(ch)
+                    after_colon = False
+                    continue
                 pieces.append(("".join(buf), delim))
                 buf, delim = [], ch
-            elif depth == 0 and not buf and delim and ch in " \t":
-                delim += ch  # 分隔符后面的空格归分隔符，original 模式才还原成 ", "
-            else:
-                buf.append(ch)
+                after_colon = False
+                continue
+
+            if depth == 0 and ch in COLON_CHARS:
+                # 词尾冒号：冒号后紧跟数字的是权重/比例（3:4、cat:1.5），不拆
+                nxt = payload[i + 1] if i + 1 < len(payload) else ""
+                buf.append(ch)  # 冒号留在段里，界面上显示成「Style:」
+                if nxt.isdigit():
+                    after_colon = False
+                    continue
+                # 标签要单独成段：先在最后一个空白处把「标签」和它前面的词切开，
+                # 否则 "flat color Subject:" 会整块粘在一起
+                parts = "".join(buf).rsplit(None, 1)
+                label = parts[-1]
+                head = parts[0] if len(parts) == 2 else ""
+                if head.strip():
+                    pieces.append((head, delim))
+                    pieces.append((label, " "))
+                else:
+                    pieces.append((label, delim))
+                buf, delim = [], ""
+                after_colon = True
+                continue
+
+            if depth == 0 and not buf and (delim or after_colon) and ch in " \t":
+                delim += ch  # 冒号后面的空格归分隔符，original 模式才还原成 ": "
+                continue
+
+            buf.append(ch)
+            after_colon = False
     pieces.append(("".join(buf), delim))
 
     out = []
@@ -75,6 +121,10 @@ def apply_toggle(text, mask_json, join_mode="comma"):
         mask = None
     if not isinstance(mask, list) or len(mask) != len(segs):
         mask = [1] * len(segs)
+    # 全开 = 原文返回，不重拼：和「闸门炸词」一致，别静默改标点
+    # （关掉任意一段才进入重拼，那时冒号标签的 . / 空格规则才生效）
+    if all(mask):
+        return text
 
     kept = [(body, before) for (body, before), on in zip(segs, mask) if on]
     if not kept:
@@ -85,7 +135,23 @@ def apply_toggle(text, mask_json, join_mode="comma"):
         for body, before in kept[1:]:
             out += (before or ", ") + body
         return out
-    return ", ".join(body for body, _ in kept)
+    # comma 模式的连接符，按“冒号标签”分三种情况：
+    #   * 前一段是标签（Style:）  -> 空格：标签紧贴它标识的内容
+    #   * 后一段是标签（Subject:）-> 句点+空格：标签起新的一句，别被逗号并进上一串
+    #   * 都不是                   -> 默认 ", "
+    # 例如 "Style: anime, flat color. Subject: 1girl"
+    out = kept[0][0]
+    for i in range(1, len(kept)):
+        prev = kept[i - 1][0]
+        cur = kept[i][0]
+        if is_colon_tail(prev):
+            sep = " "
+        elif is_colon_tail(cur):
+            sep = ". "
+        else:
+            sep = ", "
+        out += sep + cur
+    return out
 
 
 def drop_segment(text, index, pairs=None):
@@ -105,8 +171,18 @@ def drop_segment(text, index, pairs=None):
     if index == 0:
         kept[0] = (kept[0][0], "")  # 删的是第一段：新的第一段不该继承被删那段的逗号
     out = kept[0][0]
-    for body, before in kept[1:]:
-        out += (before or "") + body
+    for i in range(1, len(kept)):
+        body, before = kept[i]
+        prev = kept[i - 1][0]
+        # 与 comma 模式同一套：前一保留段是标签 -> 空格；后一段是标签 -> ". "；
+        # 否则按原文分隔符（删掉 "Style: anime" 的 anime，留 "Style: color" 而不是 "Style:, color"）
+        if is_colon_tail(prev):
+            sep = " "
+        elif is_colon_tail(body):
+            sep = ". "
+        else:
+            sep = before or ""
+        out += sep + body
     return out.strip()
 
 
@@ -135,7 +211,7 @@ class PromptToggle:
                 "text": ("STRING", {"default": "", "multiline": True}),
                 "join_mode": (["comma", "original"], {
                     "default": "comma",
-                    "tooltip": "comma=开启片段用 ', ' 拼接；original=保留原来的标点",
+                    "tooltip": "comma=开启片段用 ', ' 拼接（冒号段两侧用空格）；original=保留原来的标点",
                 }),
             },
             "optional": {
