@@ -178,7 +178,18 @@ output: (best quality:1.21), masterpiece, (1girl:1.1), blue hair, (blurry:0.9), 
 
 **The problem**: your good prompts are scattered across chat logs, notes and `.txt` files; every use is a copy-paste hunt.
 
-**How to use**: put a folder in `directory` (relative to ComfyUI's `input/`; empty means `input/prompts`), pick a `.txt` from the `file` dropdown. If a same-named image sits next to it, hovering the node shows a thumbnail.
+**How to use it**: put a folder in `directory` (relative to ComfyUI's `input/`, blank means `input/prompts`), pick a `.txt` in the `file` dropdown; drop a same-named image next to it and hovering the node shows a thumbnail.
+
+**Affixes**: `affix` wraps the file content — output only, the file is untouched:
+
+| affix | output (file is `cat, dog`) |
+|---|---|
+| 无 (none) | `cat, dog` |
+| MOSS | `<|style|> cat, dog <|/style|>` |
+| Krea2 | `Style:cat, dogSubject: ` |
+| 自定义 (custom) | `prefix + cat, dog + suffix` — the `prefix` / `suffix` fields only appear in this mode, either can be left empty |
+
+Picking 「不读取文件」(read no file) outputs an empty string with no affixes, so you never get a pair of orphan tags.
 
 **Why it's handy**: a prompt becomes a **file** — version-controlled, shareable, and reusable across workflows. Edit the file, and every workflow using it changes.
 

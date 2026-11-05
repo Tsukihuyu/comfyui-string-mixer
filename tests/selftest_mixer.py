@@ -187,7 +187,8 @@ import tempfile
 
 PFL = mod.PromptFileLoader
 req = PFL.INPUT_TYPES()["required"]
-check("INPUT_TYPES 键完整", sorted(req.keys()), ["directory", "file"])
+check("INPUT_TYPES 键完整", sorted(req.keys()),
+      ["affix", "directory", "file", "prefix", "suffix"])
 check("显示名", mod.NODE_DISPLAY_NAME_MAPPINGS["PromptFileLoader"], "📄 提示词文件 / Prompt File")
 check("默认 directory 为空（= ComfyUI/input/prompts）", req["directory"][1]["default"], "")
 check("file 下拉首项是「不读取文件」", req["file"][0][0], mod.NO_FILE)
@@ -233,6 +234,29 @@ check("gbk 回退正确解码", run(PFL, file="gbk.txt"), "国标编码中文，
 rel = os.path.join(tmp, "other")
 os.makedirs(rel)
 _write("x.txt", "别的目录", base=rel)
+
+# ---- 前后缀模板 ----
+_it = mod.PromptFileLoader.INPUT_TYPES()
+check("前后缀：四个选项", _it["required"]["affix"][0], ["无", "MOSS", "Krea2", "自定义"])
+check("前后缀：默认无", _it["required"]["affix"][1].get("default"), "无")
+check("前后缀：自定义前缀默认空", _it["required"]["prefix"][1].get("default"), "")
+check("前后缀：自定义后缀默认空", _it["required"]["suffix"][1].get("default"), "")
+
+_write("body.txt", "cat, dog")
+check("无 -> 正文原样", run(PFL, file="body.txt"), "cat, dog")
+check("MOSS -> 前<|style|>空格 + 正文 + 空格<|/style|>",
+      run(PFL, file="body.txt", affix="MOSS"), "<|style|> cat, dog <|/style|>")
+check("Krea2 -> Style:(无空格) + 正文 + Subject:空格（Space 照抄你给的原文）",
+      run(PFL, file="body.txt", affix="Krea2"), "Style:cat, dogSubject: ")
+check("自定义 -> 只有前缀", run(PFL, file="body.txt", affix="自定义", prefix="A "), "A cat, dog")
+check("自定义 -> 只有后缀", run(PFL, file="body.txt", affix="自定义", suffix=" B"), "cat, dog B")
+check("自定义 -> 前后缀都用", run(PFL, file="body.txt", affix="自定义", prefix="[", suffix="]"),
+      "[cat, dog]")
+check("自定义 -> 都留空 = 原样", run(PFL, file="body.txt", affix="自定义"), "cat, dog")
+check("非自定义时 prefix/suffix 不生效",
+      run(PFL, file="body.txt", affix="MOSS", prefix="XX", suffix="YY"),
+      "<|style|> cat, dog <|/style|>")
+check("不读文件 -> 前后缀也不加", run(PFL, affix="MOSS"), "")
 check("相对目录（相对 ComfyUI 根）", run(PFL, directory="other", file="x.txt"), "别的目录")
 check("绝对目录", run(PFL, directory=rel, file="x.txt"), "别的目录")
 check("目录不存在 -> 列表只有「不读取文件」", mod.list_txt_files("nope_donotexist"),

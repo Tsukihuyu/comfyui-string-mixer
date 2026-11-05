@@ -13,6 +13,23 @@ from ._runtime import PromptServer, web
 
 NO_FILE = "（不读取文件）"  # 下拉列表里“一个文件都不读”的选项，选中即输出空串
 
+# 前后缀：只影响输出，不改文件本身。空格一律照抄模板原文（MOSS 的后缀是前空格）。
+AFFIX_MODES = ("无", "MOSS", "Krea2", "自定义")
+AFFIX_TEMPLATES = {
+    "MOSS": ("<|style|> ", " <|/style|>"),
+    "Krea2": ("Style:", "Subject: "),
+}
+
+
+def apply_affix(text, affix="无", prefix="", suffix=""):
+    """给正文套前后缀。没有正文就还是空串——别输出一对孤立的标签。"""
+    if not text:
+        return ""
+    if affix == "自定义":
+        return f"{prefix or ''}{text}{suffix or ''}"
+    pre, suf = AFFIX_TEMPLATES.get(affix, ("", ""))
+    return f"{pre}{text}{suf}"
+
 try:
     import folder_paths  # type: ignore  # ComfyUI 运行时才有
 
@@ -146,9 +163,10 @@ def preview_thumb(path, max_side=THUMB_MAX):
 
 
 class PromptFileLoader:
-    """Prompt File Loader：从指定目录读一个 .txt，作为 string 输出。
+    """Prompt File Loader：从指定目录读一个 .txt，套上可选的前后缀，作为 string 输出。
 
-    file 选「（不读取文件）」、文件不存在、或是越界/非 .txt 路径，一律输出空串。
+    file 选「（不读取文件）」、文件不存在、或是越界/非 .txt 路径，一律输出空串（前后缀也不加）。
+    前后缀只影响输出，不改文件内容。
     """
 
     @classmethod
@@ -162,6 +180,20 @@ class PromptFileLoader:
             "file": ([NO_FILE] + list_txt_files(""), {
                 "default": NO_FILE,
                 "tooltip": "该目录下的 .txt；选「（不读取文件）」或文件已删除时输出空串。改目录后点刷新按钮",
+            }),
+            "affix": (list(AFFIX_MODES), {
+                "default": "无",
+                "tooltip": "前后缀：给文件内容套模板。MOSS=<|style|> … <|/style|>，Krea2=Style:…Subject:；自定义则用下面两个框",
+            }),
+            "prefix": ("STRING", {
+                "default": "",
+                "multiline": False,
+                "tooltip": "自定义前缀：只在 affix 选「自定义」时生效",
+            }),
+            "suffix": ("STRING", {
+                "default": "",
+                "multiline": False,
+                "tooltip": "自定义后缀：只在 affix 选「自定义」时生效",
             }),
         }}
 
@@ -178,7 +210,7 @@ class PromptFileLoader:
         # 真正的路径校验在 resolve_txt_path：必须 .txt、必须在该目录内、必须存在。
         return True
 
-    def load(self, directory, file, **kwargs):
+    def load(self, directory, file, affix="无", prefix="", suffix="", **kwargs):
         # **kwargs 兜住前端按钮控件可能被序列化进来的多余键
         path = resolve_txt_path(directory, file)
         if path is None:
@@ -186,7 +218,7 @@ class PromptFileLoader:
                 print(f"[PromptFileLoader] 读不到 {file!r}"
                       f"（目录 {resolve_directory(directory)}），输出空串")
             return ("",)
-        return (read_text_file(path),)
+        return (apply_affix(read_text_file(path), affix, prefix, suffix),)
 
 
 if PromptServer is not None:

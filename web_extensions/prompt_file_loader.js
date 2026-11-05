@@ -249,12 +249,50 @@ app.registerExtension({
 
       // 载入已存工作流时，按保存的 directory 重扫一次，列表才和控件对得上
       requestAnimationFrame(() => refreshFileList(this));
+
+      // 前后缀：只有「自定义」才需要那两个框，其余模式藏起来（免得以为模板还能改）
+      const affixW = (this.widgets || []).find((w) => w && w.name === "affix");
+      const preW = (this.widgets || []).find((w) => w && w.name === "prefix");
+      const sufW = (this.widgets || []).find((w) => w && w.name === "suffix");
+      const setShown = (w, shown) => {
+        if (!w) return;
+        if (shown) {
+          if (w.__pflHidden) {
+            delete w.computeSize;   // 回到 LiteGraph 默认高度
+            w.__pflHidden = false;
+          }
+        } else if (!w.__pflHidden) {
+          w.computeSize = () => [0, -4];   // 负高度 = 不画，但序列化顺序不变
+          w.__pflHidden = true;
+        }
+      };
+      const syncAffix = () => {
+        const custom = affixW?.value === "自定义";
+        setShown(preW, custom);
+        setShown(sufW, custom);
+        const want = this.computeSize();
+        this.setSize([this.size[0], want[1]]);
+        this.setDirtyCanvas?.(true, true);
+        app.canvas?.setDirty(true, true);
+      };
+      this.__pflSyncAffix = syncAffix;
+      if (affixW) {
+        const ob = affixW.callback;
+        affixW.callback = function (...args) {
+          const r = ob?.apply(this, args);
+          syncAffix();
+          return r;
+        };
+      }
+      requestAnimationFrame(syncAffix);
       return r;
     };
   },
 
   // 载入已存工作流：控件值在 onNodeCreated 之后才恢复，这里再按真实目录刷一次
   loadedGraphNode(node) {
-    if (node.type === NODE_TYPE) refreshFileList(node);
+    if (node.type !== NODE_TYPE) return;
+    refreshFileList(node);
+    requestAnimationFrame(() => node.__pflSyncAffix?.());
   },
 });

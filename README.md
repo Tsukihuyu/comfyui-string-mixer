@@ -180,6 +180,17 @@ git clone <本仓库地址> comfyui-string-mixer
 
 **怎么用**：`directory` 填目录（相对 ComfyUI 的 `input/`，留空就是 `input/prompts`），`file` 下拉里挑一个 `.txt`；目录里放过同名图片的话，鼠标移到节点上能看到缩略图。
 
+**前后缀**：`affix` 选一个模板，给文件内容套上首尾——只影响输出，不改文件：
+
+| affix | 输出（文件正文是 `cat, dog` 时） |
+|---|---|
+| 无 | `cat, dog` |
+| MOSS | `<|style|> cat, dog <|/style|>` |
+| Krea2 | `Style:cat, dogSubject: ` |
+| 自定义 | `前缀 + cat, dog + 后缀`（选它才会出现 `prefix` / `suffix` 两个框，都可以留空） |
+
+选「（不读取文件）」时输出空串，前后缀也不加——不会给你一对孤立标签。
+
 **方便在哪**：提示词变成**文件**，就能版本管理、能分享、能在多个工作流里共用同一份。改文件即改所有引用它的工作流。
 
 ---
