@@ -1,20 +1,28 @@
 # String-Mixer
 
-**Treat prompts as data — a set of ComfyUI nodes.**
+**Let AI generate. Let humans compose.**
 
-The annoying part of prompting is rarely "I can't think of words". It's this: you want to switch one word off and see what happens, you want to change two words of what the upstream node just gave you, the same sentence lives in five different workflows, and you can never remember whether it's `from above` or `high angle`.
+A text-processing and prompt-orchestration toolkit for ComfyUI.
 
-That's what these nodes are for: **split it, stitch it, gate it, clean it.**
+It started from a simple thought: why does editing a prompt always mean hunting through one long text box, copying, and deleting?
 
-![11 nodes](docs/images/12-family.png)
+So the text mixer came first, then prompt splitting, the text gate, and the combinations between them.
+
+Today you can split a prompt into individual chips and enable or disable each one; you can receive whatever an LLM generates and take over the input whenever you want, keeping your own edits; and you can combine text from different sources into a prompt workflow of your own.
+
+The project also includes prompt cleaning, file-based prompts, a visual camera rig, and skill-driven prompt helpers.
+
+All of it does four things: **split, join, hold back, clean up**.
+
+It is a small toolkit that grew out of real use. I hope it makes your ComfyUI workflows a little smoother.
+
+中文：[README.md](README.md)
 
 ---
 
-中文说明见 [README.md](README.md)
-
 ## Contents
 
-Install · Node overview · Text Gate · Text Gate Toggle · Prompt Toggle · Text Mix 3/5/7 · Prompt Cleaner · Prompt File · Camera Rig · Skill Writer / Skill Layout · SkillPrompt setup · Notes
+Install · Node overview · Text Gate · Text Gate Toggle · Prompt Toggle · Text Mix 3/5/7 · Prompt Cleaner · Prompt File · Camera Rig · Skill Writer / Skill Layout · SkillPrompt setup
 
 ---
 
@@ -24,45 +32,55 @@ Drop it into `ComfyUI/custom_nodes/` and restart ComfyUI:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/Tsukihuyu/comfyui-string-mixer comfyui-string-mixer
+git clone <this repository> comfyui-string-mixer
 ```
 
-- Frontend changes only need `Ctrl+Shift+R`; **Python changes require a ComfyUI restart**.
-- Core nodes have no dependencies. The thumbnail in `📄 Prompt File` uses Pillow — it still works without it, just without downscaling.
-- Every node lives under the **`String-Mixer`** right-click category; `SkillPrompt` is a subcategory.
+- Front-end changes only need `Ctrl+Shift+R`; **Python changes need a ComfyUI restart**.
+- The core nodes have no dependencies; the thumbnails in `📄 Prompt File` use Pillow (it still works without it, just without thumbnails).
+- Everything lives under the **`String-Mixer`** category in the right-click menu, with `SkillPrompt` as its subcategory.
 
 ---
 
 ## Node overview
 
-| Node | What it does | When you'd reach for it |
+| Node | What it does | When you reach for it |
 |---|---|---|
-| ⛩ **Text Gate** | Upstream text either passes through or gets replaced by yours | "The upstream text is fine except two words" |
-| ⛩ **Text Gate Toggle** | Gate + per-segment switches (follows upstream until you touch it) | "Use part of what upstream gave me" |
-| 💥 **Prompt Toggle** | Split one sentence into chips, toggle each | "Is this word even doing anything?" |
+| ⛩ **Text Gate** | Upstream text: let it through, replace it with yours, or accumulate it | "I want to change a couple of words upstream gave me" |
+| ⛩ **Text Gate Toggle** | Gate + per-chip switches (follows upstream until you touch it) | "Use part of what upstream gave me" |
+| 💥 **Prompt Toggle** | Split one sentence into chips; toggle, weight, reorder | "Is this word even doing anything?" |
 | 🧵 **Text Mix 3 / 5 / 7** | External input + N boxes, merged | "Keep quality, subject, outfit apart" |
-| 🧼 **Prompt Cleaner** | Strip bracket spam, duplicates, extra spaces | "Pasted from somewhere messy" |
-| 📄 **Prompt File** | Read a `.txt` from a folder | "I want prompts as files" |
-| 🎥 **Camera Rig** | Pick a camera angle visually | "I can't remember the shot vocabulary" |
-| ✍️ **Skill Writer** | Rulebook + LLM → finished prompt | "Fix the way prompts get written" |
-| 🧭 **Skill Layout** | Structured layout → layout prompt | "Place things by numbers, not left/right" |
+| 🧼 **Prompt Cleaner** | Strip stray brackets, duplicates, extra spaces | "A dirty prompt pasted from somewhere" |
+| 📄 **Prompt File** | Read a .txt from a folder | "I want prompts managed as files" |
+| 🎥 **Camera Rig** | Visual camera placement → shot language | "I can't remember *from above* and friends" |
+| ✍️ **Skill Writer** | Rulebook + LLM → finished prompt | "Fix the rules of how to write" |
+| 🧭 **Skill Layout** | Structured layout → layout prompt | "Positions by numbers, not left/right" |
 
 ---
+
+# Node details
 
 ## ⛩ Text Gate
 
 ![Text Gate](docs/images/01-text-gate.png)
 
-**The problem**: upstream (another node, an LLM, a file) hands you a prompt. You want to use it, but edit a few words. Before, that meant either editing upstream every time, or copy-pasting and maintaining two copies.
+**Switch freely between upstream input and your own edits.**
 
-**Two rules only:**
+When an upstream node, an LLM or a file hands you a block of text and you only want to change part of it, there is no need to copy the whole thing — and no need to go back and edit upstream.
 
-- **Box empty → pass through.** When you queue, upstream text flows into the box and continues downstream.
-- **Box has text → blocked.** Only what's in the box is output; upstream is held back. The status bar says how many characters were blocked and when upstream last ran.
+Text Gate gives you an editable box:
 
-**Why it's handy**: the box is both the display and the editor. What you see is exactly what downstream receives — there is no "shows one thing, outputs another". To go back to following upstream, hit `✕` to clear the box; no re-wiring.
+- **Pass through automatically**: when the box is empty, upstream text is received and passed on as-is.
+- **Take over manually**: once you type into the box, upstream is held back and your text is what goes out.
+- **Follow again**: clear the box and upstream flows through once more.
+- **Reservoir mode**: every time upstream produces something, only the words you have *not absorbed yet* are appended to the end of the box — never blocked, never removed.
 
-**Actual behaviour**: upstream 81 characters, six segments typed in the box, those six go out:
+The box is both the display and the editor. What you see is exactly what downstream receives.
+
+The mode button in the status bar flips between `🚧 拦截模式` (purple) and `💧 蓄水模式` (water blue). In reservoir mode upstream simply accumulates: if upstream inserts one word in the middle, only that word is absorbed; repeats are not absorbed twice. Absorbed words are remembered in the node properties and saved with the workflow; clearing the box clears that record too, so upstream can fill it again. Reservoir mode ignores "did you touch it" and the manual lock entirely.
+
+It suits workflows that switch between dynamic text and hand edits — and workflows where each new generation from upstream slowly builds up one long prompt.
+
+**In practice**: upstream is 81 characters, you type six segments, those six go out.
 
 ```
 upstream: masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms, smile, ...
@@ -79,32 +97,29 @@ output:   masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms
 
 ![Text Gate Toggle: segments off + manual lock](docs/images/02b-gate-locked.png)
 
-**The problem**: upstream gives a whole sentence; you want part of it this time, and maybe a different part next time.
+**Let a dynamically generated prompt be edited and controlled word by word.**
 
-**The gate opens on "did you touch it", not on "is the box empty"**:
+This is Text Gate combined with Prompt Toggle. It receives upstream text *and* splits it into chips, so you can pick which pieces actually reach the output.
 
-- **Untouched** (no edits, no segments off, no lock) → every queue lets the new upstream in, and **this run's output is the new text**; the box refreshes with it. When upstream is an LLM writing fresh words each time, you never have to hit `✕` to re-open the gate.
-- **Touched** (edited text / switched segments off / hit 🔒) → upstream gets blocked, only the box is output, and the status bar names the reason (`关了词`, `字改过`, `手动锁`, `手写内容`).
+Its defining behaviour: **the node decides by whether you have interfered with the text, not merely by whether the box is empty.**
 
-**Three details when untouched**:
+- **Follow automatically**: untouched text is replaced by the latest upstream text on every run.
+- **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on.
+- **Chip weight**: `＋` / `－` on the left of a chip adjusts its weight and writes the result into the text box; a LoRA segment has its own strength field adjusted instead.
+- **Drag to reorder**: hold a chip, drag it, release — the text box is reordered and the switch and weight travel with that word.
+- **Edit by hand**: changing the text or deleting a chip puts the node into manual takeover.
+- **Manual lock**: lock the current text even without editing it, so later upstream updates cannot overwrite it.
+- **Follow again**: unlock or reset the interference and upstream flows in once more.
 
-- All-off then all-on counts as **untouched** — only the final state matters.
-- Upstream gives nothing this run → **the old words stay**, with an explicit `上游这次是空的 · 旧词保留` note.
-- Workflows saved before this version (no `tgs_base` record) are treated as **locked** — your hand-written box is never overwritten.
+Both a comma join and an original-punctuation join are supported, with special handling for colon labels like `Style:` / `Subject:` and for ratio and weight syntax; balanced punctuation (`<lora:…>`, `[a, b]`, `《…》`, quotes and friends) is kept whole so nothing inside it is split.
 
-**🔒 Manual lock**: sometimes you just want to keep these words, without editing a character, and without them being replaced. One click locks; clicking again unlocks and accepts the current content as the new baseline.
+The same mode button lives here: switch to `💧 蓄水模式` and new upstream words accumulate run after run instead of overwriting what you have edited.
 
-**Splitting** (when the box has text): split on punctuation; all-on outputs the original text; with some off it re-joins per the join mode; **all-off outputs empty** and turns the counter red (so you never silently ship an empty prompt).
+![Reservoir mode](docs/images/14-reservoir.png)
 
-**Join modes**: `comma` re-joins with `", "` (**a space around colon labels**, see below), `original` keeps the original punctuation.
+It suits most prompts that arrive from upstream: you keep the automation and still step in whenever the result needs adjusting.
 
-**Colon labels split out on their own**: words ending with a colon (`Style:`, `Subject:`) become their own segments with the colon kept. Joins put a space after a label and `period + space` before it (`… flat color. Subject: 1girl`); `original` mode still restores the source text. A colon followed by a digit is left alone (`3:4`, `cat:1.5`).
-
-**Green/red and `×` are different things**: clicking a chip only says "use it this round" (the word stays). Clicking the `×` at the right edge **deletes that segment from the text box for real**, punctuation included. An `Undo delete` button appears for 10 seconds afterwards. Deleting a segment counts as touching.
-
-**Why it's handy**: one click flips between "everything upstream gave me" and "the subset I picked"; when you're done, `✕` or unlocking with 🔒 puts it back on follow. Off segments stay in place and turn red — **they are not deleted** — so switching one back on costs nothing.
-
-**Actual behaviour**: 10 segments, 3 off
+**In practice**: three of ten segments switched off.
 
 ```
 input:  masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms, smile, looking at viewer, shallow depth of field, cinematic light
@@ -117,13 +132,23 @@ output: masterpiece, best quality, 1girl, kimono, cherry blossoms, smile, cinema
 
 ![Prompt Toggle](docs/images/03-prompt-toggle.png)
 
-**The problem**: you wrote a prompt by hand and want to test, word by word, which parts actually matter.
+**Split a whole prompt into chips you can control independently.**
 
-**How it differs from Text Gate Toggle**: this node ignores upstream entirely — it's a plain word-splitter with switches. The upstream input is optional; when connected, it's prepended to your result (upstream verbatim, not affected by the switches).
+Testing whether a word actually affects the result no longer means copying, deleting and restoring the whole block of text.
 
-**Why it's handy**: no copy-paste into another tool to compare. Off words stay put, and turning them back on restores the original sentence. To really remove one, use the `×` at the right edge of the chip (undoable for 10 seconds).
+Prompt Toggle recognises independent segments and turns them into interactive chips:
 
-**Colon labels split out on their own**: words ending with a colon (`Style:`, `Subject:`, `风格：`) become their own chips with the colon kept. When joining, a label is followed by a **space** (it sticks to what it labels) and preceded by **a period plus a space** (it starts a new sentence instead of being folded into the previous comma list) — so a Krea2-style `Style: … Subject: …` survives toggling intact. A colon followed by a digit is left alone (`3:4`, `cat:1.5` weights/ratios), and so is anything inside parentheses or a `<|…|>` block.
+- **Enable/disable per chip**: click a chip to decide whether it takes part in the output.
+- **The text is kept**: a disabled chip is not deleted; switch it back on and it returns.
+- **Delete for real**: remove a chip you no longer want, with a short undo window.
+- **Chip weight**: `＋` / `－` on the left add or subtract 0.05; a bare word becomes `(blue hair:1.15)` and goes back to bare form at 1.00.
+- **Drag to reorder**: hold a chip, drag it, release; the switch and weight follow that word.
+- **Flexible rejoin**: comma join or original-punctuation join.
+- **Syntax protection**: colon labels, numeric ratios and weight expressions are recognised, and balanced punctuation (brackets, book-title marks, quotes, `<lora:…>`) is kept whole — a tag like `<lora:003.Aesthetic_Quality_Modifiers:0.80>` is never torn apart.
+
+You can edit only the text inside the node, or connect upstream text and have it prepended verbatim to the result.
+
+It suits testing prompts one item at a time, adjusting tag combinations, and fine control over what an image model reads.
 
 ```
 input:  masterpiece, best quality, 1girl, blue hair, kimono, cherry blossoms, smile, looking at viewer, shallow depth of field, cinematic light
@@ -137,21 +162,26 @@ output: masterpiece, 1girl, blue hair, kimono, smile, cinematic light
 
 ![Text Mix 3](docs/images/04-mix-3.png)
 
-**The problem**: a prompt is always "quality words + subject + outfit + scene + lighting" glued together. Stuffed into one box, changing one part means searching through a long line.
+**Break a prompt into independent modules and combine them as needed.**
 
-**Rules**: order is fixed — **external input → box 1 → box 2 → …**; empty boxes are skipped, disabled boxes are skipped entirely; the separator defaults to a single space and can be set to `, `.
+A complete prompt usually carries quality words, subject, outfit, environment and lighting. Keeping all of that in one text box makes both editing and reuse awkward.
 
-The three variants differ only in capacity (3 / 5 / 7 slots); merging is identical:
+Text Mix gives you 3, 5 or 7 separate text boxes, managed independently and joined in a fixed order into one prompt.
 
-![Text Mix 5](docs/images/05-mix-5.png)
-![Text Mix 7](docs/images/06-mix-7.png)
+- **Edit separately**: each box is written and edited on its own.
+- **Switch separately**: turn a module off without touching the rest.
+- **External input**: receive upstream text and put it at the front of the result.
+- **Custom separator**: space, comma, or whatever you prefer.
+- **Three sizes**: pick 3, 5 or 7 boxes depending on the workflow.
 
-**Why it's handy**: changing the outfit touches only box 3; trying other lighting touches only box 7 and a toggle. **The same skeleton can be reused across workflows**, because every slot is stated explicitly.
+It suits modular, reusable prompt sets shared across workflows and generation tasks.
+
+**Why it helps**: changing an outfit means editing one box; trying different lighting means editing another and toggling it. **The same skeleton is reusable across workflows**, because every box says plainly what it holds.
 
 ```
 external: (empty)
 box 1: masterpiece, best quality
-box 2: 1girl, blue hair        <- disabled
+box 2: 1girl, blue hair        ← off
 box 3: cherry blossoms, soft light
 separator: ", "
 output: masterpiece, best quality, cherry blossoms, soft light
@@ -163,11 +193,20 @@ output: masterpiece, best quality, cherry blossoms, soft light
 
 ![Prompt Cleaner](docs/images/07-cleaner.png)
 
-**The problem**: prompts copied from elsewhere arrive with `(((...)))`, duplicate words, triple spaces and square brackets. Feeding that to a model gives you blown-out or mushy results for no obvious reason.
+**Clean up redundant formatting so the text stays consistent.**
 
-**Four switches, four jobs**: weight handling (normalise into a range / strip all), duplicate removal, formatting (consistent commas and spaces), plus weight floor and ceiling.
+Prompts copied from other models, workflows or reference material often arrive with duplicate words, redundant brackets, stray spaces and inconsistent weight syntax.
 
-**Why it's handy**: you don't need to remember the `(word:1.2)` syntax — tick a few boxes and get a clean line. And it **changes weights, not words**: the word stays, only its strength lands in a range you accept.
+Prompt Cleaner handles all of that in one place:
+
+- **Weight handling**: normalise weights, or strip weight expressions entirely.
+- **Duplicate removal**: find and drop repeated prompts.
+- **Formatting**: unify commas and spacing.
+- **Weight range**: clamp weights to a floor and ceiling so nothing runs away.
+
+Each step can be switched on independently.
+
+It suits imported prompts, complicated weight expressions, and normalising text inputs across a workflow.
 
 ```
 input:  (((best quality))), masterpiece,   masterpiece , ((1girl)), 1girl, blue hair, [blurry], (smile:1.2)
@@ -180,22 +219,21 @@ output: (best quality:1.21), masterpiece, (1girl:1.1), blue hair, (blurry:0.9), 
 
 ![Prompt File](docs/images/08-file.png)
 
-**The problem**: your good prompts are scattered across chat logs, notes and `.txt` files; every use is a copy-paste hunt.
+**Keep prompts as files and share them between workflows.**
 
-**How to use it**: put a folder in `directory` (relative to ComfyUI's `input/`, blank means `input/prompts`), pick a `.txt` in the `file` dropdown; drop a same-named image next to it and hovering the node shows a thumbnail.
+Prompts you use often are better stored as plain text files than copied into yet another workflow.
 
-**Affixes**: `affix` wraps the file content — output only, the file is untouched:
+Prompt File reads `.txt` files from a chosen folder and lets you pick one from a dropdown.
 
-| affix | output (file is `cat, dog`) |
-|---|---|
-| 无 (none) | `cat, dog` |
-| MOSS | `<|style|> cat, dog <|/style|>` |
-| Krea2 | `Style: cat, dog Subject: ` |
-| 自定义 (custom) | `prefix + cat, dog + suffix` — the `prefix` / `suffix` fields only appear in this mode, either can be left empty |
+- **Folder read**: read prompt files from a folder inside ComfyUI's input directory.
+- **Quick switching**: choose a different file from the dropdown.
+- **Thumbnail preview**: if an image with the same name exists, hovering previews it.
+- **Affix presets**: plain text, MOSS, Krea2 and custom affix formats.
+- **Reuse**: the same file can be read by many workflows; edit the file and every reader updates.
 
-Picking 「不读取文件」(read no file) outputs an empty string with no affixes, so you never get a pair of orphan tags.
+It suits managing common prompt templates, character descriptions and style presets without scattering them across workflows.
 
-**Why it's handy**: a prompt becomes a **file** — version-controlled, shareable, and reusable across workflows. Edit the file, and every workflow using it changes.
+**Why it helps**: a prompt becomes a **file** — versionable, shareable, and shared by several workflows at once. Edit the file and every reference follows.
 
 ---
 
@@ -203,32 +241,66 @@ Picking 「不读取文件」(read no file) outputs an empty string with no affi
 
 ![Camera Rig](docs/images/09-camera.png)
 
-**The problem**: camera language is the worst offender for template phrases — `from above`, `high angle`, `cowboy shot`, `85mm`. Easy to forget, and a wrong one is invisible until you look at the picture.
+**Control camera parameters visually and get the matching English shot description.**
 
-**How to use**: the left side is a drag-able top-down camera diagram; the right side groups by **azimuth / elevation / shot size / perspective / aperture / tilt**. **The preview line is the exact line that gets queued**, not a reference value.
+Shot language is full of English you have to memorise: `from above`, `high angle`, `cowboy shot`, `85mm`. Hand-writing it is both hard to remember and hard to judge before you see the result.
 
-**Why it's handy**: what you see is what you get. You adjust "from the right, slightly high, medium shot"; the node emits weighted camera phrases. Weight mode can be "conservative cap" or "bare words".
+Camera Rig puts the usual camera parameters into one visual panel:
+
+- **Placement**: drag on the diagram to set the viewing direction.
+- **Height**: pick pitch and shooting height.
+- **Shot size**: close-up, medium shot, wide shot and the rest.
+- **Perspective and focal length**: set perspective and lens.
+- **Tilt**: adjust the roll of the frame.
+- **Weight mode**: weighted shot description, or bare tags.
+
+The node previews the exact text it will emit when the queue runs it.
+
+It suits people who do not know English shot terms by heart, and anyone who wants precise, visible control over composition inside a workflow.
+
+**Why it helps**: what you see is what you get — you pick "from the right, slightly high, medium shot", the node emits the weighted shot words; the weight mode can be a safe cap or bare words.
 
 ```
-azimuth = right, elevation = slightly high, shot = medium, focal 50mm
+azimuth = right, height = slightly high, shot size = medium, focal 50mm
 output: (from front:1.05), (from right:1.35), (high angle:1.14), (from above:1.14), (cowboy shot:1.40)
 ```
 
 ---
 
-## ✍️ Skill Writer / 🧭 Skill Layout
+## ✍️ Skill Writer
 
-These two come from the `skillprompt` subpackage — the "let an LLM write prompts under fixed rules" half. Every other node here is offline; only these need an endpoint.
+**Have an LLM write prompts according to rules you define.**
 
-![Skill Writer](docs/images/10-skill-writer.png)
+Every model and workflow expects its own prompt format, structure and phrasing. Rather than rewriting the prompt — or re-describing the rules — every time, keep those requirements in a rulebook.
 
-**Skill Writer**: you describe what you want in plain language (Chinese works), and it writes the prompt following the selected rulebook (`SKILL.md`) and output format (`caption` / `tag` / `layout`). The rulebook decides *how*; the node decides *which model*.
+Skill Writer calls an OpenAI-compatible endpoint with your input, the rulebook and the requested output format.
 
-**Why it's handy**: it moves prompt style out of your muscle memory and into a file. Change the rulebook and every workflow using it changes with it.
+- **Custom rulebooks**: define generation rules in `SKILL.md`.
+- **Multiple skills**: keep several rulebooks and switch between them.
+- **Output formats**: Caption, Tag and Layout modes.
+- **Any endpoint**: manage OpenAI-compatible endpoints in a config file.
+- **Reuse**: edit the rulebook and every workflow using it follows.
 
-![Skill Layout](docs/images/11-skill-layout.png)
+The rulebook defines the standard; the node calls the model and assembles the input.
 
-**Skill Layout**: local only, no network. Takes a structured layout (`summary` + a `box` per element) and emits one line of precisely placed layout prompt — positions as numbers, not vague `left / right / center`.
+It suits building your own prompt-writing standard, so the LLM produces text suited to your models and workflows.
+
+---
+
+## 🧭 Skill Layout
+
+**Turn a structured layout into precise positional prompt text.**
+
+Describing a layout in natural language — `left`, `right`, `center` — is imprecise and ambiguous.
+
+Skill Layout does not use an LLM at all: it reads structured layout data and converts element positions into prompt text.
+
+- **Structured input**: layout data with a `summary` and per-element `box` coordinates.
+- **Numeric positioning**: describe positions with coordinates and sizes.
+- **Automatic wording**: organise the layout into text an image model can use.
+- **Local only**: no API, no network, no extra model call.
+
+It suits turning visual layout analysis into prompt text, so the model understands how several subjects relate to each other in the frame.
 
 ---
 
@@ -249,29 +321,19 @@ base_url = http://127.0.0.1:1234/v1
 model = qwen3-8b-instruct
 ```
 
-Each `[section]` becomes one entry in the dropdown; restart ComfyUI after editing.
+Each `[section]` becomes one entry in the dropdown; restart ComfyUI after editing it.
 
-> `skillprompt.ini` holds addresses and possibly keys. **It is git-ignored — never commit it.**
+> `skillprompt.ini` holds addresses and possibly keys, **it is in `.gitignore` — do not commit it**.
 
-**2. Rulebooks**
+**2. A rulebook**
 
 ```
 skillprompt/skills/<name>/SKILL.md
 ```
 
-One folder per rulebook; the dropdown shows the folder name. The bundled `skillprompt/skills/demo/SKILL.md` is an **empty file** that only demonstrates the structure — write your own content to actually use it.
+One folder per rulebook, shown in the dropdown by folder name. The bundled `skillprompt/skills/demo/SKILL.md` is an **empty file** that only demonstrates the layout — write your own content to actually use it.
 
 ---
-
-## Notes
-
-- **Node type names are stable** (`StringMixer`, `TextGateSplit`, …), so existing workflows keep loading. Only display names changed.
-- **Both gates are output nodes**: selecting one and hitting Queue runs just it and its upstream; the others run with whatever consumes them.
-- **State travels with the workflow**: text typed into a gate, which segments are off, camera parameters — all live in node properties and are saved in the workflow `.json`.
-- **The gate remembers whether you touched it**: the text it last absorbed lives in the `tgs_base` node property, so a page refresh or a reopened workflow still knows whether to follow upstream.
-- **Hitting `✎` while the queue is busy is refused outright**: the status bar says 「前序任务还没跑完 · 稍后再试」. It does not sneak into the queue and does not retry later on its own — opening the gate means running upstream, which competes for the same resources.
-- **Python changes need a restart; frontend changes need `Ctrl+Shift+R`.** If unsure, do both.
-- **The README images are real screenshots taken by a script**: `node tools/shots/shoot.mjs` re-shoots everything (ComfyUI on `127.0.0.1:8199`), or a single scene with `node tools/shots/shoot.mjs 02-gate-toggle`.
 
 ## License
 
