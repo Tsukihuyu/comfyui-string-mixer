@@ -19,6 +19,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { ChipList } from "./chip_panel.js";
 
 const NODE_TYPE = "TextGateSplit";
 const BAR_H = 30;        // 状态条固定高度
@@ -151,30 +152,13 @@ function ensureStyle() {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
   display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; padding: 2px;
 }
-.tgs-chip {
-  display: inline-flex; align-items: center;
-  font-size: 12px; line-height: 17px; padding: 2px 6px 2px 9px; border-radius: 11px;
-  cursor: pointer; max-width: 100%; white-space: normal; word-break: break-word;
-  text-align: left; border: 1px solid transparent; font-weight: 500;
-  transition: filter 0.12s ease, transform 0.08s ease;
-  font-family: inherit;
+/* 词条本体（.smchip 系列）由 chip_panel.js 统一提供，两个炸词节点共用一份 */
+.tgs-btn.tgs-water { color: #d8b4fe; background: rgba(139, 92, 246, 0.16); border-color: rgba(167, 139, 250, 0.6); }
+.tgs-btn.tgs-water[data-water="1"] {
+  color: #bfe9ff; background: rgba(56, 150, 200, 0.34);
+  border-color: rgba(120, 205, 245, 0.95);
+  box-shadow: 0 0 8px rgba(90, 180, 235, 0.35);
 }
-.tgs-chip:hover { filter: brightness(1.35); }
-.tgs-chip:active { transform: scale(0.96); }
-.tgs-chip.on { background: rgba(46, 160, 67, 0.22); border-color: rgba(74, 222, 128, 0.75); color: #86efac; }
-.tgs-chip.off { background: rgba(248, 81, 73, 0.15); border-color: rgba(248, 81, 73, 0.55); color: #fca5a5; }
-/* 词右边的删除键：一道淡竖线隔开 */
-.tgs-chip-del {
-  position: relative; flex: 0 0 auto; padding: 0 2px 0 8px; margin-left: 2px;
-  font-size: 12px; line-height: 13px; cursor: pointer; opacity: 0.8; font-weight: 700;
-  align-self: stretch; display: flex; align-items: center;
-}
-.tgs-chip-del::before {
-  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px;
-  background: currentColor; opacity: 0.55;
-}
-.tgs-chip-del:hover { opacity: 1; color: #ff9b9b; }
-.tgs-chip-del:hover::before { opacity: 0.6; }
 .tgs-mini[data-undo="1"] {
   display: none;
   border-color: rgba(255, 190, 90, 0.6);
@@ -283,13 +267,17 @@ function acceptAsBaseline(node) {
   app.graph?.change?.();
 }
 
-// adopt 是纯注入用的输入（界面上不该多出这个插槽，插了也没意义）
-function hideAdoptSocket(node) {
-  const idx = (node.inputs || []).findIndex((i) => i && i.name === "adopt");
-  if (idx >= 0) {
-    node.inputs.splice(idx, 1);
-    node.setDirtyCanvas?.(true, true);
+// adopt / reservoir 是纯注入用的输入（界面上不该多出这些插槽，插了也没意义）
+function hideInjectedSockets(node) {
+  let hit = false;
+  for (const name of ["adopt", "reservoir"]) {
+    const idx = (node.inputs || []).findIndex((i) => i && i.name === name);
+    if (idx >= 0) {
+      node.inputs.splice(idx, 1);
+      hit = true;
+    }
   }
+  if (hit) node.setDirtyCanvas?.(true, true);
 }
 
 function gateState(node) {
@@ -378,116 +366,56 @@ function updatePreview(node) {
 // ------------------------------------------------------------------ 片段渲染
 
 function renderChips(node) {
-  const st = node.__tgs;
-  if (!st || !st.list) return;
-  const { segs, mask } = st;
-
-  if (st.countEl) {
-    const on = segs.reduce((n, _, i) => n + (maskOn(mask, i) ? 1 : 0), 0);
-    st.countEl.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
-    st.countEl.dataset.off = segs.length && on === 0 ? "1" : "";
-  }
-
-  if (!segs.length) {
-    const hint = document.createElement("div");
-    hint.className = "tgs-hint";
-    hint.textContent = "框里有字后，这里会按标点炸成可点的片段（点一下关掉/打开）";
-    st.list.replaceChildren(hint);
-    return;
-  }
-
-  const chips = segs.map((seg, i) => {
-    const on = maskOn(mask, i);
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = `tgs-chip ${on ? "on" : "off"}`;
-    b.title = (on ? "点击关掉这一段（不出现在输出里）" : "点击打开")
-      + "；右上角 × 从文本框里删掉这一段";
-    const label = document.createElement("span");
-    label.textContent = seg;
-    const del = document.createElement("span");
-    del.className = "tgs-chip-del";
-    del.textContent = "×";
-    del.title = "从文本框里彻底删掉这一段（可撤销）";
-    del.addEventListener("pointerdown", (e) => e.stopPropagation());
-    del.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      deleteSegment(node, i);
-    });
-    b.append(label, del);
-    b.addEventListener("pointerdown", (e) => e.stopPropagation());
-    b.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      st.mask[i] = st.mask[i] ? 0 : 1;
-      writeMask(node, st.mask);
-      cancelFlash(node);
-      renderChips(node);
-      render(node);
-    });
-    return b;
-  });
-  st.list.replaceChildren(...chips);
-}
-
-// ------------------------------------------------------------------ 删除片段（×）
-// 绿/红 = 这一轮用不用；× = 真从文本框里抽走，抽完给一次撤销机会。
-
-function showUndo(node) {
-  const st = node.__tgs;
-  if (!st?.undoBtn || !st.undo) return;
-  st.undoBtn.style.display = "inline-block";  // 不能置空：CSS 里默认是 display:none
-  clearTimeout(st.undoTimer);
-  st.undoTimer = setTimeout(() => {
-    st.undoBtn.style.display = "none";
-    st.undo = null;
-  }, 10000);
-}
-
-async function deleteSegment(node, index) {
-  const st = node.__tgs;
-  if (!st?.segs || index < 0 || index >= st.segs.length) return;
-  const w = textWidget(node);
-  const text = String(w?.value ?? "");
-  try {
-    // 新文本由服务端算（它手里有原标点），前端只管写回
-    const res = await api.fetchApi(
-      `/prompt_toggle/split?text=${encodeURIComponent(text)}&drop=${index}`,
-      { cache: "no-store" },
-    );
-    const data = await res.json();
-    if (typeof data.text !== "string" || data.text === text) return;
-    st.undo = { text, segs: st.segs.slice(), mask: (st.mask || []).slice() };
-    w.value = data.text;
-    w.callback?.(data.text); // 走原有回调 -> 重新拆分 + reconcile
-    node.setDirtyCanvas?.(true, true);
-    app.canvas.setDirty(true, true);
-    showUndo(node);
-  } catch (e) {
-    console.warn("[TextGateSplit] 删除片段失败：", e);
-  }
+  // 词条本体（开关 / × 删除 / 拖动排序 / 权重加减）统一在 chip_panel.js 里
+  node.__tgs?.chips?.render();
 }
 
 function undoDelete(node) {
-  const st = node.__tgs;
-  if (!st?.undo) return;
-  const { text, segs, mask } = st.undo;
-  st.undo = null;
-  clearTimeout(st.undoTimer);
-  if (st.undoBtn) st.undoBtn.style.display = "none";
-  st.segs = segs.slice();
-  st.mask = mask.slice();
-  writeMask(node, st.mask);
-  const w = textWidget(node);
-  if (w) {
-    w.value = text;
-    w.callback?.(text);
+  node.__tgs?.chips?.undoLast();
+}
+
+// ------------------------------------------------------------------ 蓄水模式
+//
+// properties.tgs_reservoir = "1" 时进入蓄水：永不拦、不看动没动手，上游每次给的
+// "账本里没有的段"由后端算好回报（rsv_chunk / rsv_keys），前端把增量接在框末尾。
+// 账本 properties.tgs_seen 是归一键数组；✕ 清空框会连账本一起清。
+
+const RSV_KEY = "tgs_reservoir";
+const SEEN_KEY = "tgs_seen";
+
+function rsvOn(node) {
+  return node.properties?.[RSV_KEY] === "1";
+}
+
+function readSeen(node) {
+  try {
+    const v = JSON.parse(node.properties?.[SEEN_KEY] || "[]");
+    return Array.isArray(v) ? v.map((x) => String(x)) : [];
+  } catch {
+    return [];
   }
-  renderChips(node);
+}
+
+function writeSeen(node, keys) {
+  node.properties = node.properties || {};
+  if (keys.length) node.properties[SEEN_KEY] = JSON.stringify(keys);
+  else delete node.properties[SEEN_KEY];
+  app.graph?.change?.();
+}
+
+function toggleReservoir(node) {
+  const st = node.__tgs;
+  if (!st || st.busy) return;
+  const on = !rsvOn(node);
+  node.properties = node.properties || {};
+  if (on) node.properties[RSV_KEY] = "1";
+  else delete node.properties[RSV_KEY];
+  st.sig = ""; // 状态条要立刻重画
+  app.graph?.change?.();
+  flash(node, on
+    ? "💧 已切到蓄水模式 · 上游的新词会接在框末尾（重复的不蓄）"
+    : "🚧 已切回拦截模式 · 框空放行、有字拦下", on ? "info" : "", 3500);
   render(node);
-  node.setDirtyCanvas?.(true, true);
-  app.canvas.setDirty(true, true);
 }
 
 // ------------------------------------------------------------------ 分段请求（与 PromptToggle 同一个后端逻辑）
@@ -515,6 +443,7 @@ async function refreshSegments(node) {
         ? st.mask.slice()
         : reconcile(st.segs, st.mask, segs);
     st.segs = segs;
+    st.weights = data.weights || [];
     st.mask = mask.length === segs.length ? mask : segs.map(() => 1);
     writeMask(node, st.mask);
     renderChips(node);
@@ -529,6 +458,10 @@ async function refreshSegments(node) {
 function render(node) {
   const st = node.__tgs;
   if (!st || !st.btn) return;
+  // 框架偶尔会在控件变动后把注入用的插槽加回来：顺手再摘一次（幂等、很便宜）
+  if ((node.inputs || []).some((i) => i && (i.name === "adopt" || i.name === "reservoir"))) {
+    hideInjectedSockets(node);
+  }
 
   const mode = modeOf(node);
   const gate = gateState(node);
@@ -561,6 +494,13 @@ function render(node) {
     label = "✎ 覆盖改动";
   }
 
+  const reservoir = rsvOn(node);
+  if (reservoir) {
+    // 蓄水时闸门那套（开/关/拦下/动过手/手动锁）全部让位，只报账本
+    state = st.busy ? "busy" : "water";
+    label = st.busy ? "✎ 蓄水中…" : "✎ 放入上游";
+  }
+
   let note;
   let tone = "";
   if (st.busy) {
@@ -591,12 +531,18 @@ function render(node) {
     note = st.flash.text;
     tone = st.flash.tone || "";
   }
+  if (reservoir && !st.flash && !st.busy && !st.error) {
+    note = `蓄水模式 · 账本 ${readSeen(node).length} 段`
+      + (st.rsvLast ? ` · 上次 +${st.rsvLast} 段` : "");
+    tone = "info";
+  }
 
   const showClear = mode === "snapshot";
   const clearArmed = st.armed === "clear";
 
   const sig = [state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0,
-    st.busy ? 1 : 0, gate.manualLock ? 1 : 0].join("|");
+    st.busy ? 1 : 0, gate.manualLock ? 1 : 0,
+    reservoir ? 1 : 0, reservoir ? readSeen(node).length : 0].join("|");
   if (st.sig === sig) {
     updatePreview(node);
     return;
@@ -608,8 +554,10 @@ function render(node) {
   st.btn.textContent = label;
   st.btn.title =
     (st.error ? st.error + "\n\n" : "") +
-    "把上游放进框里：只执行本节点和它的上游（其他分支不动），上游没变时走缓存，基本瞬发。\n" +
-    "框空着、或者你没动过手时，不用点它——下次执行会自己换。";
+    (reservoir
+      ? "蓄水中：点它 = 正常执行一次，只把上游里的新词接到框末尾（重复的不蓄）。"
+      : "把上游放进框里：只执行本节点和它的上游（其他分支不动），上游没变时走缓存，基本瞬发。\n"
+        + "框空着、或者你没动过手时，不用点它——下次执行会自己换。");
 
   if (st.clearBtn) {
     st.clearBtn.style.display = showClear ? "" : "none";
@@ -620,12 +568,23 @@ function render(node) {
     st.clearBtn.disabled = !!st.busy;
   }
 
+  if (st.waterBtn) {
+    st.waterBtn.textContent = reservoir ? "💧 蓄水模式" : "🚧 拦截模式";
+    st.waterBtn.dataset.water = reservoir ? "1" : "0";
+    st.waterBtn.disabled = !!st.busy;
+    st.waterBtn.title = reservoir
+      ? `蓄水模式：上游每次给的新词接在框末尾，重复的不蓄。账本已记 ${readSeen(node).length} 段；点一下切回拦截模式。`
+      : "拦截模式（原来的闸门：框空放行、有字拦下）。点一下切到蓄水模式：上游给多少蓄多少，只增不减。";
+  }
+
   if (st.lockBtn) {
     const lockedNow = gate.manualLock;
     st.lockBtn.textContent = lockedNow ? "🔒" : "🔓";
     st.lockBtn.dataset.on = lockedNow ? "1" : "";
-    st.lockBtn.disabled = !!st.busy || !sourceText(node).trim();
-    st.lockBtn.title = !sourceText(node).trim()
+    st.lockBtn.disabled = !!st.busy || reservoir || !sourceText(node).trim();
+    st.lockBtn.title = reservoir
+      ? "蓄水模式不看闸门，锁不上（点 💧 蓄水模式 切回拦截模式）"
+      : !sourceText(node).trim()
       ? "框是空的，闸门本来就开着，不用锁"
       : lockedNow
         ? "已锁定：下次执行不会换掉这里的内容。点击 = 解锁，并把当前内容认作新基线"
@@ -679,6 +638,18 @@ function arm(node, kind) {
 
 // ------------------------------------------------------------------ 写入 / 开闸
 
+// 词条面板改文本（删词/排序/权重）走这里：只写控件 + 走回调，不碰基线——
+// 用户动过手就该被闸门认出来，下次执行不会拿上游把这堆改动盖掉。
+function writeBoxText(node, text) {
+  const w = textWidget(node);
+  if (!w) return;
+  w.value = text;
+  w.callback?.(text);
+  node.setDirtyCanvas?.(true, true);
+  app.canvas?.setDirty?.(true, true);
+  app.graph?.change?.();
+}
+
 function applyInflow(node, raw, count, why) {
   const st = node.__tgs;
   const w = textWidget(node);
@@ -721,11 +692,13 @@ function clearBox(node) {
   st.armed = null;
   st.at = "";
   st.flash = null;
+  st.rsvLast = 0;
+  writeSeen(node, []); // 蓄水账本一起清，否则清空后上游的老词永远蓄不进来
   node.setDirtyCanvas?.(true, true);
   app.graph?.change?.();
   refreshSegments(node);
   render(node);
-  flash(node, "已开闸 · 下次执行上游会流进来", "info", 3000);
+  flash(node, rsvOn(node) ? "已清空 · 上游的词会重新蓄进来" : "已开闸 · 下次执行上游会流进来", "info", 3000);
 }
 
 // 锁按钮：只负责手动锁本身。🔓 -> 锁上；🔒 -> 解开（并把当前内容认作新基线）
@@ -867,6 +840,11 @@ function installPromptInjection() {
         entry.inputs.mask = JSON.stringify(node.__tgs.mask || []);
         // adopt=1：这次没动过手，后端直接把新上游放进闸（而不是拦下）
         entry.inputs.adopt = gateState(node).open ? "1" : "0";
+        // 蓄水：开关 + 已吸收账本
+        entry.inputs.reservoir = JSON.stringify({
+          on: rsvOn(node) ? 1 : 0,
+          seen: readSeen(node),
+        });
       }
     }
     return res;
@@ -884,7 +862,7 @@ function setupNode(node) {
     btn: null, clearBtn: null, lockBtn: null, status: null,
     upEl: null, upHead: null, upBody: null,
     panel: null, list: null, count: null,
-    segs: [], mask: [], seq: 0,
+    segs: [], weights: [], mask: [], seq: 0, waterBtn: null, rsvLast: 0,
     baseline: sourceText(node),
     dirty: false, armed: null, busy: false, pending: false,
     error: "", at: "", count: 0, blocked: false, allOff: false,
@@ -903,7 +881,7 @@ function setupNode(node) {
     node.widgets.splice(maskIdx, 1);
   }
   st.mask = readMask(node);
-  hideAdoptSocket(node);
+  hideInjectedSockets(node);
 
   // 编辑框高度按内容算（layout 里分配），这里给个初值
   const textW = textWidget(node);
@@ -959,9 +937,9 @@ function setupNode(node) {
   const countEl = document.createElement("span");
   countEl.className = "tgs-count";
   // 删除后的撤销入口：平时 display:none，点 × 之后出现 10 秒
-  const undoBtn = mk("撤销删除", () => undoDelete(node));
+  const undoBtn = mk("撤销", () => undoDelete(node));
   undoBtn.dataset.undo = "1";
-  undoBtn.title = "把刚删掉的那一段放回文本框（10 秒内有效）";
+  undoBtn.title = "把上一步操作（删除 / 拖动排序 / 权重）退回原来的文本（10 秒内有效）";
   bar.append(
     mk("全开", () => { st.mask = st.segs.map(() => 1); writeMask(node, st.mask); renderChips(node); render(node); }),
     mk("全关", () => { st.mask = st.segs.map(() => 0); writeMask(node, st.mask); renderChips(node); render(node); }),
@@ -977,6 +955,19 @@ function setupNode(node) {
   chipsWidget.serialize = false;
   chipsWidget.computeSize = (width) => [width ?? 300, CHIPS_H + 16];
   st.chipsWidget = chipsWidget;
+
+  // 词条面板：开关 / × 删除 / 拖动排序 / 权重加减，逻辑都在 chip_panel.js
+  st.chips = new ChipList(node, {
+    state: st,
+    list,
+    countEl,
+    undoBtn,
+    hint: "框里有字后，这里会按标点炸成可点的片段（点一下关掉/打开，按住拖动换位置）",
+    getText: () => sourceText(node),
+    writeText: (text) => writeBoxText(node, text),
+    writeMask: (arr) => writeMask(node, arr),
+    after: () => { cancelFlash(node); render(node); },
+  });
 
   // ---- 状态条
   const sbar = document.createElement("div");
@@ -1022,10 +1013,23 @@ function setupNode(node) {
     onLockClick(node);
   });
 
+  // 蓄水开关：自动 ⇄ 蓄水（状态在 properties，不新增控件行）
+  const waterBtn = document.createElement("button");
+  waterBtn.type = "button";
+  waterBtn.className = "tgs-btn tgs-water";
+  waterBtn.textContent = "🚧 拦截模式";
+  waterBtn.style.padding = "0 8px";
+  waterBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  waterBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleReservoir(node);
+  });
+
   const status = document.createElement("span");
   status.className = "tgs-status";
-  sbar.append(btn, clearBtn, lockBtn, status);
-  st.btn = btn; st.clearBtn = clearBtn; st.lockBtn = lockBtn; st.status = status;
+  sbar.append(btn, clearBtn, waterBtn, lockBtn, status);
+  st.btn = btn; st.clearBtn = clearBtn; st.waterBtn = waterBtn; st.lockBtn = lockBtn; st.status = status;
 
   const barWidget = node.addDOMWidget("tgs_bar", "tgs_bar", sbar, { serialize: false });
   barWidget.serialize = false;
@@ -1067,7 +1071,7 @@ function setupNode(node) {
       s.mask = readMask(this);
       s.segs = []; // 让 refreshSegments 走「按存档位置沿用」那条路
       s.baseline = propStr(this, "tgs_base");
-      hideAdoptSocket(this);
+      hideInjectedSockets(this);
       s.dirty = false;
       s.blocked = false;
       s.armed = null;
@@ -1281,6 +1285,59 @@ app.registerExtension({
 
       st.upSrc = raw;
       st.upAt = stamp();
+
+      // ---- 蓄水：后端只回报"这次新增了什么"，这里把增量接在框内文本末尾
+      //      故意不覆盖整框：一次排队跑多轮时，后端手里的 text 是排队那一刻的快照
+      if (message.rsv_on && message.rsv_on[0]) {
+        const wasPending = st.pending;
+        st.pending = false;
+        st.busy = false;
+        st.armed = null;
+        clearTimeout(st.waitTimer);
+
+        const chunk = String(message.rsv_chunk?.[0] ?? "");
+        const add = String(message.rsv_fresh?.[0] ?? "");
+        const n = Number((message.rsv_n && message.rsv_n[0]) ?? 0) || 0;
+        let keys = [];
+        try {
+          keys = JSON.parse(message.rsv_keys?.[0] ?? "[]");
+        } catch {
+          keys = [];
+        }
+
+        if (!(message.ts_linked && message.ts_linked[0])) {
+          st.error = "上游没接线";
+          render(this);
+          return r;
+        }
+        if (chunk) {
+          const cur = sourceText(this);
+          const next = cur.trim() ? cur.replace(/[ 	]+$/, "") + chunk : (add || chunk.trim());
+          const w = textWidget(this);
+          if (w) {
+            w.value = next;
+            w.callback?.(next);
+          }
+          setProp(this, "tgs_base", next);   // 蓄水过的内容就是新基线
+          setProp(this, "tgs_mbase", "");
+          st.baseline = next;
+          st.dirty = false;
+          st.blocked = false;
+          st.at = stamp();
+          if (keys.length) writeSeen(this, readSeen(this).concat(keys));
+          st.rsvLast = n;
+          this.setDirtyCanvas?.(true, true);
+          app.graph?.change?.();
+          flash(this, `💧 蓄水 +${n} 段`, "info", 3000);
+        } else {
+          st.rsvLast = 0;
+          flash(this, wasPending && !raw.trim()
+            ? "上游这次是空的"
+            : "💧 蓄水模式 · 这次没有新词", wasPending && !raw.trim() ? "warn" : "", 2500);
+        }
+        render(this);
+        return r;
+      }
 
       if (st.pending) {
         st.pending = false;

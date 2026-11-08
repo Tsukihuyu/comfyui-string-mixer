@@ -1,10 +1,91 @@
 """文本闸门 ⛩ / 闸门炸词 ⛩：框空就放上游进来，有字就拦下；炸词版再按标点开关片段。
 
 闸门段与 TextSnapshot 同一套语义；炸词段复用 toggle.py 的拆分与拼回。
+
+第三种状态是**蓄水**：永不拦，上游每次都把"账本里没有的段"接到框内文本末尾。
 """
 import json
 
-from .toggle import apply_toggle, split_prompt_segments
+from .toggle import apply_toggle, split_prompt_segments, split_spans
+
+
+# ---------------------------------------------------------------------------
+# 蓄水（reservoir）：只增不减的上游累积
+# ---------------------------------------------------------------------------
+# 判据只有一条：这一段"蓄过没有"。比对的两边是「上游这一次给的每一段」和「账本」，
+# 与框里现在有什么无关——手动写进去的同名词不会被当成重复吃掉，也不会被拦。
+#
+# 为什么按段而不是按整段文本：上游常常只在中间插一个词（或改一个词），整段比对
+# 会把前面所有词再蓄一遍。按段差集就只蓄那一个词。
+
+
+def seg_key(body):
+    """账本的归一键：大小写折叠、下划线当空格、连续空白压缩（刻意不剥权重）。
+
+    * "Blue_Hair" 与 "blue hair" -> 同一段，不会重复蓄
+    * "(blue hair:1.1)" 与 "blue hair" -> 两段（上游改权重能蓄进来）
+    """
+    return " ".join(str(body).casefold().replace("_", " ").split())
+
+
+def parse_reservoir(blob):
+    """前端注入的 {"on":1,"seen":[...]} -> (开没开, 账本)。"""
+    try:
+        cfg = json.loads(blob) if blob else None
+    except (ValueError, TypeError):
+        return False, []
+    if not isinstance(cfg, dict):
+        return False, []
+    seen = cfg.get("seen")
+    seen = [str(x) for x in seen] if isinstance(seen, list) else []
+    return bool(cfg.get("on")), seen
+
+
+def append_chunk(body, tail):
+    """给前端的追加串：带上分隔符，直接接在框内文本末尾。"""
+    raw = str(body or "")
+    if not raw.strip():
+        return tail
+    if raw.rstrip(" \t").endswith("\n"):
+        return tail  # 框里已经是换行结尾：新词另起一行
+    t = raw.rstrip()
+    if t[-1] in ",，;；" or t[-1] in ".。!！?？":
+        return " " + tail
+    return ", " + tail
+
+
+def absorb_upstream(body, raw, seen=()):
+    """把上游里"账本没有的段"按原顺序接到 body 末尾。
+
+    返回 (新文本, 新增段, 新增的归一键, 追加串)。
+      * 上游在中间插了一个词 -> 只有那一个词是新增
+      * 上游完全重复        -> 一个都不加（新文本 == body）
+    这里没有"强制再蓄"这一档：点按钮和正常排队走的是同一条路，只蓄新词。
+    """
+    body = str(body or "")
+    raw = str(raw or "")
+    ledger = list(seen)
+    known = set(ledger)
+    fresh, new_keys, taken = [], [], set()
+    if raw.strip():
+        for seg, _before, _start, _end in split_spans(raw):
+            key = seg_key(seg)
+            if not key or key in taken:
+                continue
+            if key in known:
+                continue
+            taken.add(key)
+            fresh.append(seg)
+            if key not in known:
+                new_keys.append(key)
+    if not fresh:
+        return body, [], [], ""
+    tail = ", ".join(fresh)
+    chunk = append_chunk(body, tail)
+    # 行尾空格去掉，但保留换行（换行结尾时新词另起一行）
+    new_text = (body.rstrip(" \t") + chunk) if body.strip() else tail
+    return new_text, fresh, new_keys, chunk
+
 
 # ---------------------------------------------------------------------------
 # TextSnapshot -> 文本闸门 ⛩：框空时放上游进来（并留在框里），有字时只输出框内
@@ -45,6 +126,10 @@ class TextSnapshot:
                     "forceInput": True,
                     "tooltip": "上游文本：只有点「拉取上游」时才读进来，不会随队列自动更新",
                 }),
+                "reservoir": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "蓄水模式开关 + 已吸收账本（界面注入的 JSON），不用手填",
+                }),
             },
         }
 
@@ -54,9 +139,30 @@ class TextSnapshot:
     CATEGORY = "String-Mixer"
     OUTPUT_NODE = True
 
-    def snapshot(self, text, source=None):
+    def snapshot(self, text, source=None, reservoir=""):
         linked, parts = snapshot_source(source)
         raw = "\n\n".join(parts)
+
+        # 蓄水：永不拦，只把账本里没有的段接到框内文本末尾
+        on, seen = parse_reservoir(reservoir)
+        if on:
+            out, fresh, new_keys, chunk = absorb_upstream(str(text), raw, seen)
+            return {
+                "ui": {
+                    "ts_source": [raw],
+                    "ts_count": [len(parts)],
+                    "ts_linked": [1 if linked else 0],
+                    "ts_used": [0],
+                    "ts_blocked": [0],
+                    "rsv_on": [1],
+                    "rsv_n": [len(fresh)],
+                    "rsv_fresh": [", ".join(fresh)],
+                    "rsv_chunk": [chunk],
+                    "rsv_keys": [json.dumps(new_keys, ensure_ascii=False)],
+                },
+                "result": (out,),
+            }
+
         # 闸门：框空 = 开着，输出上游（让上游流过去）；框里有字 = 关着，只输出框内的字。
         body = str(text)
         if not body.strip():
@@ -155,6 +261,10 @@ class TextGateSplit:
                     "forceInput": True,
                     "tooltip": "由节点界面注入：1 = 上次流入后没动过手，这次让新上游直接进来",
                 }),
+                "reservoir": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "蓄水模式开关 + 已吸收账本（界面注入的 JSON），不用手填",
+                }),
             },
         }
 
@@ -164,12 +274,37 @@ class TextGateSplit:
     CATEGORY = "String-Mixer"
     OUTPUT_NODE = True
 
-    def run(self, text, join_mode, mask="", source=None, adopt=""):
+    def run(self, text, join_mode, mask="", source=None, adopt="", reservoir=""):
         linked, parts = snapshot_source(source)
         raw = "\n\n".join(parts)
         body = str(text)
         segs = split_prompt_segments(body)
         arr = _mask_array(mask, len(segs))
+
+        # 蓄水：永不拦、不看动没动手，只把账本里没有的段接到框内文本末尾。
+        # 手动点按钮和正常排队走同一条路（没有"强制再蓄"那一档，避免误解）。
+        on, seen = parse_reservoir(reservoir)
+        if on:
+            out, fresh, new_keys, chunk = absorb_upstream(body, raw, seen)
+            return {
+                "ui": {
+                    "ts_source": [raw],
+                    "ts_count": [len(parts)],
+                    "ts_linked": [1 if linked else 0],
+                    "ts_used": [0],
+                    "ts_blocked": [0],
+                    "tgs_total": [len(segs)],
+                    "tgs_kept": [len(segs) if arr is None else sum(arr)],
+                    "tgs_all_off": [0],
+                    "tgs_adopted": [0],
+                    "rsv_on": [1],
+                    "rsv_n": [len(fresh)],
+                    "rsv_fresh": [", ".join(fresh)],
+                    "rsv_chunk": [chunk],
+                    "rsv_keys": [json.dumps(new_keys, ensure_ascii=False)],
+                },
+                "result": (out,),
+            }
 
         # adopt=1：上次流入之后用户没动过手。上游给的新词就是他要的，直接放行，
         # 本次输出就是新词（不必跑两遍）。框空时本来就走这条路。

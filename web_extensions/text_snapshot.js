@@ -96,6 +96,13 @@ function ensureStyle() {
   color: #c9b4b4; background: rgba(160, 90, 90, 0.14);
   border-color: rgba(190, 110, 110, 0.5);
 }
+/* 蓄水开关：关 = 中性，开 = 水蓝高亮（state 属性单独开关，别和上面几个混） */
+.ts-btn.ts-water { color: #d8b4fe; background: rgba(139, 92, 246, 0.16); border-color: rgba(167, 139, 250, 0.6); }
+.ts-btn.ts-water[data-water="1"] {
+  color: #bfe9ff; background: rgba(56, 150, 200, 0.34);
+  border-color: rgba(120, 205, 245, 0.95);
+  box-shadow: 0 0 8px rgba(90, 180, 235, 0.35);
+}
 .ts-clear {
   color: rgba(200, 210, 230, 0.7); background: transparent;
   border: 1px solid rgba(150, 165, 195, 0.35);
@@ -166,6 +173,50 @@ function stamp() {
     .join(":");
 }
 
+// ------------------------------------------------------------------ 蓄水模式
+//
+// properties.ts_reservoir = "1" 时进入蓄水：永不拦、不看动没动手，上游每次给的"账本里没有的段"
+// 由后端算好后回报（rsv_chunk / rsv_keys），前端把增量接在框内文本末尾。
+// 账本 properties.ts_seen 是归一键数组；✕ 清空框会连账本一起清。
+
+const RSV_KEY = "ts_reservoir";
+const SEEN_KEY = "ts_seen";
+
+function rsvOn(node) {
+  return node.properties?.[RSV_KEY] === "1";
+}
+
+function readSeen(node) {
+  try {
+    const v = JSON.parse(node.properties?.[SEEN_KEY] || "[]");
+    return Array.isArray(v) ? v.map((x) => String(x)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSeen(node, keys) {
+  node.properties = node.properties || {};
+  if (keys.length) node.properties[SEEN_KEY] = JSON.stringify(keys);
+  else delete node.properties[SEEN_KEY];
+  app.graph?.change?.();
+}
+
+function toggleReservoir(node) {
+  const st = node.__ts;
+  if (!st || st.busy) return;
+  const on = !rsvOn(node);
+  node.properties = node.properties || {};
+  if (on) node.properties[RSV_KEY] = "1";
+  else delete node.properties[RSV_KEY];
+  st.sig = ""; // 状态条要立刻重画
+  app.graph?.change?.();
+  flash(node, on
+    ? "💧 已切到蓄水模式 · 上游的新词会接在框末尾（重复的不蓄）"
+    : "🚧 已切回拦截模式 · 框空放行、有字拦下", on ? "info" : "", 3500);
+  render(node);
+}
+
 // follow = 框空且有上游（闸门开）；void = 框空且没上游；snapshot = 框里有字（闸门关）
 function modeOf(node) {
   if (sourceText(node).trim()) return "snapshot";
@@ -223,6 +274,10 @@ function updatePreview(node) {
 function render(node) {
   const st = node.__ts;
   if (!st || !st.btn) return;
+  // 框架偶尔会把注入用的插槽加回来：顺手再摘一次（幂等、很便宜）
+  if ((node.inputs || []).some((i) => i && i.name === "reservoir")) {
+    hideReservoirSocket(node);
+  }
 
   const mode = modeOf(node);
   // 脏判定：当前文本 != 上次从上游拿到的原文（只在闸门关着时才有意义）
@@ -248,6 +303,13 @@ function render(node) {
   } else if (st.dirty) {
     state = "dirty";
     label = "✎ 覆盖改动";
+  }
+
+  const reservoir = rsvOn(node);
+  if (reservoir) {
+    // 蓄水时闸门那套（开/关/拦下/动过手）全部让位，只报账本
+    state = st.busy ? "busy" : "water";
+    label = st.busy ? "✎ 蓄水中…" : "✎ 放入上游";
   }
 
   let note;
@@ -278,6 +340,11 @@ function render(node) {
     note = st.flash.text;
     tone = st.flash.tone || "";
   }
+  if (reservoir && !st.flash) {
+    note = `蓄水模式 · 账本 ${readSeen(node).length} 段`
+      + (st.rsvLast ? ` · 上次 +${st.rsvLast} 段` : "");
+    tone = "info";
+  }
 
   // 清空按钮：只有闸门关着时才有意义（开着时框本来就是空的）
   const showClear = mode === "snapshot";
@@ -285,6 +352,7 @@ function render(node) {
 
   const sig = [
     state, label, note, tone, showClear ? 1 : 0, clearArmed ? 1 : 0, st.busy ? 1 : 0,
+    reservoir ? 1 : 0, reservoir ? readSeen(node).length : 0,
   ].join("|");
   if (st.sig === sig) {
     updatePreview(node);
@@ -297,8 +365,10 @@ function render(node) {
   st.btn.textContent = label;
   st.btn.title =
     (st.error ? st.error + "\n\n" : "") +
-    "把上游放进框里：只执行本节点和它的上游（其他分支不动），上游没变时走缓存，基本瞬发。\n" +
-    "框空着时不用点它——下次执行上游会自己流进来。";
+    (reservoir
+      ? "蓄水中：点它 = 正常执行一次，只把上游里的新词接到框末尾（重复的不蓄）。"
+      : "把上游放进框里：只执行本节点和它的上游（其他分支不动），上游没变时走缓存，基本瞬发。\n"
+        + "框空着时不用点它——下次执行上游会自己流进来。");
 
   if (st.clearBtn) {
     st.clearBtn.style.display = showClear ? "" : "none";
@@ -308,6 +378,15 @@ function render(node) {
       ? "再点一次：清空框，重新开闸（下次执行上游会流进来）"
       : "清空框，重新开闸";
     st.clearBtn.disabled = !!st.busy;
+  }
+
+  if (st.waterBtn) {
+    st.waterBtn.textContent = reservoir ? "💧 蓄水模式" : "🚧 拦截模式";
+    st.waterBtn.dataset.water = reservoir ? "1" : "0";
+    st.waterBtn.disabled = !!st.busy;
+    st.waterBtn.title = reservoir
+      ? `蓄水模式：上游每次给的新词接在框末尾，重复的不蓄。账本已记 ${readSeen(node).length} 段；点一下切回拦截模式。`
+      : "拦截模式（原来的闸门：框空放行、有字拦下）。点一下切到蓄水模式：上游给多少蓄多少，只增不减。";
   }
 
   st.status.textContent = note;
@@ -474,10 +553,12 @@ function clearBox(node) {
   st.at = "";
   st.count = 0;
   st.flash = null;
+  st.rsvLast = 0;
+  writeSeen(node, []); // 蓄水账本一起清，否则清空后上游的老词永远蓄不进来
   node.setDirtyCanvas?.(true, true);
   app.graph?.change?.();
   render(node);
-  flash(node, "已开闸 · 下次执行上游会流进来", "info", 3000);
+  flash(node, rsvOn(node) ? "已清空 · 上游的词会重新蓄进来" : "已开闸 · 下次执行上游会流进来", "info", 3000);
 }
 
 function onClearClick(node) {
@@ -494,6 +575,38 @@ function onClearClick(node) {
 
 // ------------------------------------------------------------------ 节点装配
 
+// 蓄水状态不是控件：排队前由这里注入成 reservoir 输入（带账本和"强制再蓄"位）
+let injectionInstalled = false;
+
+function installPromptInjection() {
+  if (injectionInstalled) return;
+  injectionInstalled = true;
+  const orig = app.graphToPrompt.bind(app);
+  app.graphToPrompt = async function (...args) {
+    const res = await orig(...args);
+    const out = res?.output || {};
+    for (const node of app.graph?._nodes || []) {
+      if (node?.type !== NODE_TYPE || !node.__ts) continue;
+      const entry = out[String(node.id)];
+      if (!entry?.inputs) continue;
+      entry.inputs.reservoir = JSON.stringify({
+        on: rsvOn(node) ? 1 : 0,
+        seen: readSeen(node),
+      });
+    }
+    return res;
+  };
+}
+
+// reservoir 是纯注入用的输入：界面上不该多出这个插槽
+function hideReservoirSocket(node) {
+  const idx = (node.inputs || []).findIndex((i) => i && i.name === "reservoir");
+  if (idx >= 0) {
+    node.inputs.splice(idx, 1);
+    node.setDirtyCanvas?.(true, true);
+  }
+}
+
 function setupNode(node) {
   if (node.__ts) return;
   ensureStyle();
@@ -501,6 +614,7 @@ function setupNode(node) {
   const st = (node.__ts = {
     btn: null,
     clearBtn: null,
+    waterBtn: null,
     status: null,
     upEl: null,
     upHead: null,
@@ -520,7 +634,11 @@ function setupNode(node) {
     upSig: "",
     flash: null,
     sig: "",
+    rsvLast: 0,     // 上次蓄了几段（状态条报账用）
   });
+
+  installPromptInjection();
+  hideReservoirSocket(node);
 
   // ---- 上游预览条（只读，不参与任何输入；放在编辑框和按钮之间）
   const upEl = document.createElement("div");
@@ -576,9 +694,22 @@ function setupNode(node) {
   const status = document.createElement("span");
   status.className = "ts-status";
 
-  bar.append(btn, clearBtn, status);
+  // 蓄水开关：自动 ⇄ 蓄水。状态存在 properties，不新增控件行
+  const waterBtn = document.createElement("button");
+  waterBtn.type = "button";
+  waterBtn.className = "ts-btn ts-water";
+  waterBtn.textContent = "🚧 拦截模式";
+  waterBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  waterBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleReservoir(node);
+  });
+
+  bar.append(btn, clearBtn, waterBtn, status);
   st.btn = btn;
   st.clearBtn = clearBtn;
+  st.waterBtn = waterBtn;
   st.status = status;
 
   const domWidget = node.addDOMWidget("ts_bar", "ts_bar", bar, { serialize: false });
@@ -732,6 +863,57 @@ app.registerExtension({
       st.upSrc = raw;
       st.upCount = count;
       st.upAt = stamp();
+
+      // ---- 蓄水：后端只回报"这次新增了什么"，这里把增量接在框内文本末尾
+      //      故意不覆盖整框：一次排队跑多轮时，后端手里的 text 是排队那一刻的快照
+      if (message.rsv_on && message.rsv_on[0]) {
+        const wasPending = st.pending;
+        st.pending = false;
+        st.busy = false;
+        st.armed = null;
+        clearTimeout(st.waitTimer);
+
+        const chunk = String(message.rsv_chunk?.[0] ?? "");
+        const add = String(message.rsv_fresh?.[0] ?? "");
+        const n = Number((message.rsv_n && message.rsv_n[0]) ?? 0) || 0;
+        let keys = [];
+        try {
+          keys = JSON.parse(message.rsv_keys?.[0] ?? "[]");
+        } catch {
+          keys = [];
+        }
+
+        if (!(message.ts_linked && message.ts_linked[0])) {
+          st.error = "上游没接线";
+          render(this);
+          return r;
+        }
+        if (chunk) {
+          const cur = sourceText(this);
+          const next = cur.trim() ? cur.replace(/[ \t]+$/, "") + chunk : (add || chunk.trim());
+          const w = textWidget(this);
+          if (w) {
+            w.value = next;
+            w.callback?.(next);
+          }
+          st.baseline = next;
+          st.dirty = false;
+          st.blocked = false;
+          st.at = stamp();
+          if (keys.length) writeSeen(this, readSeen(this).concat(keys));
+          st.count = readSeen(this).length;
+          st.rsvLast = n;
+          this.setDirtyCanvas?.(true, true);
+          app.graph?.change?.();
+          flash(this, `💧 蓄水 +${n} 段`, "info", 3000);
+        } else {
+          st.rsvLast = 0;
+          flash(this, wasPending && !raw.trim()
+            ? "上游这次是空的"
+            : "💧 蓄水模式 · 这次没有新词", wasPending && !raw.trim() ? "warn" : "", 2500);
+        }
+        return r;
+      }
 
       if (st.pending) {
         st.pending = false;

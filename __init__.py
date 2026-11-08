@@ -55,12 +55,25 @@ PromptFileLoader -> Prompt File Loader（从指定目录读一个 .txt，作为 
     jpg/jpeg/png/webp 缩略图（最长边 320px，后端用 PIL 缓存）；没有同名图就不显示。
 
 PromptToggle -> Prompt Toggle（编辑框 + 按标点拆出的可点片段）：
-  * 拆分：中英文逗号、句号、分号、换行；括号内与 <|...|> 块整块不拆；刻意不切冒号。
+  * 拆分：中英文逗号、句号、分号、换行；成对标点（() [] {} （） 【】 《》 〈〉 「」 『』 “” ‘’ <>）
+    配对成功时内部整块不拆，<|...|> 块同样整块；刻意不切冒号（标签冒号除外）。
   * 片段开关存在节点属性里（前端写 properties，随工作流保存），排队时由前端注入 mask 输入；
     节点界面上没有 mask 控件，mask 是可选输入（API 调用不传 = 全开）。
   * join_mode：comma=用 ", " 拼接；original=保留原来的标点。
   * upstream（拼接上游）：上游文本整段排在前，本节点结果接在后面，不参与片段开关。
   * 界面：片段排在编辑框下方，点一下切换；节点高度有下限，超出滚动，拖高才铺开。
+  * 片段面板（两个炸词节点共用 web_extensions/chip_panel.js）：
+      - 单击 = 开关；按住拖动 = 换位置（真改文本框顺序，开关与权重跟着词走）
+      - 左侧竖排 ＋/－ = 权重 ±0.05，夹在 0.05–2.00，写进文本框（裸词 -> (词:1.15)，
+        回到 1.00 自动去括号）；LoRA 段改它自己的强度（0–2.00），不套外层括号
+      - 右侧 × = 从文本框删掉这一段；「撤销」管删/拖/权重，10 秒内有效
+
+蓄水模式（文本闸门 / 闸门炸词都有）：
+  * 状态条上的 💧 按钮切换。开着时永不拦：每次执行把上游里「账本里没有的段」
+    接到框内文本末尾（按段查重，不按整句），只增不减。
+  * 归一键 = 大小写折叠 + 下划线当空格 + 压缩空白（不剥权重）；账本存 properties，
+    不设上限；✕ 清空框会连账本一起清。
+  * 没有"强制再蓄"这一档：蓄水时点 ✎ 和正常排队同一条路，只蓄新词。
 
 TextSnapshot -> 文本闸门 ⛩（闸门：框空放上游进来，有字就拦下上游）：
   * 状态由"框里有没有字"表达（无意义空格/换行不算），没有额外开关：
@@ -82,6 +95,7 @@ TextGateSplit -> 闸门炸词 ⛩（闸门 + 按标点炸开成可开关片段�
     有关掉的片段 -> 按 join_mode 重拼（comma/original）；片段全关 -> 空串 + 界面红字报警。
   * 开关状态存在节点 properties（tgs_mask），排队时由前端注入 mask 输入，界面上没有那一行控件。
   * 开关按文字内容接续：改字或上游流入后，同一段词保持原来的开关状态（与 PromptToggle 一致）。
+  * 片段面板与 PromptToggle 是同一份（chip_panel.js）：单击开关 / 拖动排序 / ＋－调权重 / × 删词。
 
 CameraMixer -> Camera Mixer（可视化相机，输出相机提示词）：
   * 一个节点管全部：方位 / 俯仰 / 距离 / 焦距 / 光圈 / 倾斜，没有副节点。
@@ -137,7 +151,14 @@ from .nodes.files import (  # noqa: E402,F401
     list_txt_files,
     preview_thumb,
 )
-from .nodes.gates import TextGateSplit, TextSnapshot  # noqa: E402,F401
+from .nodes.gates import (  # noqa: E402,F401
+    TextGateSplit,
+    TextSnapshot,
+    absorb_upstream,
+    append_chunk,
+    parse_reservoir,
+    seg_key,
+)
 from .nodes.mixers import (  # noqa: E402,F401
     PromptSanitizer,
     StringMixer,
@@ -147,7 +168,15 @@ from .nodes.mixers import (  # noqa: E402,F401
 )
 from .nodes.toggle import (  # noqa: E402,F401
     PromptToggle,
+    adjust_weight,
     apply_toggle,
+    compose_bodies,
+    drop_segment,
+    format_weight,
     merge_upstream,
+    move_segment,
+    parse_weight,
+    set_weight,
     split_prompt_segments,
+    split_spans,
 )

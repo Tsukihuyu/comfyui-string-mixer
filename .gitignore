@@ -7,3 +7,6 @@ skillprompt.ini
 # 截图器的临时浏览器 profile
 tools/shots/.profile/
 .verify/
+
+# 打包产物（部署用 zip）
+dist/

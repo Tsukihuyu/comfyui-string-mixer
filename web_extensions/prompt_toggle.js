@@ -8,6 +8,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { ChipList } from "./chip_panel.js";
 
 const NODE_TYPE = "PromptToggle";
 const MIN_NODE_H = 320; // 节点高度下限
@@ -53,35 +54,12 @@ function reconcile(prevSegs, prevMask, segs) {
   });
 }
 
-// 开=绿，关=红；配色用 class（内联样式写不了 :hover）
+// 开=绿，关=红；词条本体由 chip_panel.js 统一画（两个炸词节点共用一份）
 function ensureChipStyles() {
   if (document.getElementById("pfl-chip-style")) return;
   const css = document.createElement("style");
   css.id = "pfl-chip-style";
   css.textContent = `
-    .pfl-chip{
-      display:inline-flex;align-items:center;
-      font-size:12px;line-height:17px;padding:2px 6px 2px 9px;border-radius:11px;
-      cursor:pointer;max-width:100%;white-space:normal;word-break:break-word;
-      text-align:left;border:1px solid transparent;font-weight:500;
-      transition:filter .12s ease,transform .08s ease;
-    }
-    .pfl-chip:hover{filter:brightness(1.35)}
-    .pfl-chip:active{transform:scale(.96)}
-    .pfl-chip.on{background:rgba(46,160,67,.22);border-color:rgba(74,222,128,.75);color:#86efac}
-    .pfl-chip.off{background:rgba(248,81,73,.15);border-color:rgba(248,81,73,.55);color:#fca5a5}
-    /* 词右边的删除键：一道淡竖线隔开，点它把这段从文本框里彻底删掉（不是关掉） */
-    .pfl-chip-del{
-      position:relative;flex:0 0 auto;padding:0 2px 0 8px;margin-left:2px;
-      font-size:12px;line-height:13px;cursor:pointer;opacity:.8;font-weight:700;
-      align-self:stretch;display:flex;align-items:center;
-    }
-    .pfl-chip-del::before{
-      content:"";position:absolute;left:0;top:0;bottom:0;width:1px;
-      background:currentColor;opacity:.55;
-    }
-    .pfl-chip-del:hover{opacity:1;color:#ff9b9b}
-    .pfl-chip-del:hover::before{opacity:.6}
     .pfl-undo{
       font-size:11px;line-height:17px;padding:0 7px;border-radius:6px;cursor:pointer;
       display:none;border:1px solid rgba(255,190,90,.6);
@@ -89,6 +67,7 @@ function ensureChipStyles() {
     }
     .pfl-undo:hover{background:rgba(255,180,60,.3)}
     .pfl-status{font-size:11px;margin-left:auto;opacity:.75;font-variant-numeric:tabular-nums}
+    .pfl-status[data-off="1"]{color:#ff9b9b}
   `;
   document.head.appendChild(css);
 }
@@ -116,55 +95,12 @@ function smallButton(label, onclick) {
 function render(node) {
   const st = node.__pt;
   if (!st) return;
-  const { list, segs, mask } = st;
   ensureChipStyles();
-
-  if (st.status) {
-    const on = segs.reduce((n, _, i) => n + (mask[i] === 0 ? 0 : 1), 0);
-    st.status.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
-  }
-
-  if (!segs.length) {
-    const hint = document.createElement("div");
-    hint.textContent = "在上面的编辑框里输入提示词，这里会按标点拆成可点的片段";
-    hint.style.cssText = "font-size:11px;opacity:.55;padding:4px 2px;";
-    list.replaceChildren(hint);
-    return;
-  }
-
-  const chips = segs.map((seg, i) => {
-    const on = mask[i] !== 0;
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = `pfl-chip ${on ? "on" : "off"}`;
-    b.title = (on ? "点击关掉" : "点击打开") + "；右上角 × 从文本框里删掉这一段";
-    const label = document.createElement("span");
-    label.textContent = seg;
-    const del = document.createElement("span");
-    del.className = "pfl-chip-del";
-    del.textContent = "×";
-    del.title = "从文本框里彻底删掉这一段（可撤销）";
-    del.addEventListener("pointerdown", (e) => e.stopPropagation());
-    del.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      deleteSegment(node, i);
-    });
-    b.append(label, del);
-    b.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      st.mask[i] = st.mask[i] ? 0 : 1;
-      writeMask(node, st.mask);
-      render(node);
-    });
-    return b;
-  });
-  list.replaceChildren(...chips);
+  st.chips?.render();
 }
 
-// ------------------------------------------------------------------ 删除片段（×）
-// 绿/红只是"这一轮用不用"，× 是真把这段从文本框里抽走；抽完给一次撤销机会。
+// ------------------------------------------------------------------ 写文本框
+// 词条面板（开关/删除/拖动/权重）统一在 chip_panel.js 里，这里只负责把新文本写回控件。
 
 function writeText(node, text) {
   const w = getWidget(node, "text");
@@ -173,52 +109,6 @@ function writeText(node, text) {
   w.callback?.(text); // 走原有回调 -> 重新拆分、按文字接续 mask
   node.setDirtyCanvas?.(true, true);
   app.canvas?.setDirty?.(true, true);
-}
-
-function showUndo(node) {
-  const st = node.__pt;
-  if (!st?.undoBtn || !st.undo) return;
-  st.undoBtn.style.display = "inline-block";  // 不能置空：CSS 里默认是 display:none
-  clearTimeout(st.undoTimer);
-  st.undoTimer = setTimeout(() => {
-    st.undoBtn.style.display = "none";
-    st.undo = null;
-  }, 10000);
-}
-
-async function deleteSegment(node, index) {
-  const st = node.__pt;
-  if (!st?.segs || index < 0 || index >= st.segs.length) return;
-  const text = String(getWidget(node, "text")?.value ?? "");
-  try {
-    // 让服务端算新文本：它手里有原标点，前端自己拼容易和 original 模式两套实现
-    const res = await api.fetchApi(
-      `/prompt_toggle/split?text=${encodeURIComponent(text)}&drop=${index}`,
-      { cache: "no-store" },
-    );
-    const data = await res.json();
-    if (typeof data.text !== "string" || data.text === text) return;
-    st.undo = { text, segs: st.segs.slice(), mask: (st.mask || []).slice() };
-    writeText(node, data.text);
-    showUndo(node);
-  } catch (e) {
-    console.warn("[PromptToggle] 删除片段失败：", e);
-  }
-}
-
-function undoDelete(node) {
-  const st = node.__pt;
-  if (!st?.undo) return;
-  const { text, segs, mask } = st.undo;
-  st.undo = null;
-  clearTimeout(st.undoTimer);
-  if (st.undoBtn) st.undoBtn.style.display = "none";
-  // 先把片段与 mask 放回去，再写文本：reconcile 看到的正好是同一组片段，开关状态原样接住
-  st.segs = segs.slice();
-  st.mask = mask.slice();
-  writeMask(node, st.mask);
-  writeText(node, text);
-  render(node);
 }
 
 // 打字时不必每个字符都拆一次，攒 180ms 再算
@@ -246,6 +136,7 @@ async function refreshSegments(node) {
         ? st.mask.slice()
         : reconcile(st.segs, st.mask, segs);
     st.segs = segs;
+    st.weights = data.weights || [];
     st.mask = mask.length === segs.length ? mask : segs.map(() => 1);
     writeMask(node, st.mask);
     render(node);
@@ -358,7 +249,7 @@ function ensurePanelWatch() {
 
 function setupNode(node) {
   if (node.__pt) return;
-  const st = (node.__pt = { segs: [], mask: [], seq: 0 });
+  const st = (node.__pt = { segs: [], weights: [], mask: [], seq: 0 });
   installPromptInjection();
   ensurePanelWatch();
 
@@ -426,13 +317,13 @@ function setupNode(node) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "pfl-undo";
-      b.textContent = "撤销删除";
-      b.title = "把刚删掉的那一段放回文本框（10 秒内有效）";
+      b.textContent = "撤销";
+      b.title = "把上一步操作（删除 / 拖动排序 / 权重）退回原来的文本（10 秒内有效）";
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
       b.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        undoDelete(node);
+        st.chips?.undoLast();
       });
       st.undoBtn = b;
       return b;
@@ -462,6 +353,19 @@ function setupNode(node) {
 
   st.panel = panel;
   st.list = list;
+
+  // 词条面板：开关 / × 删除 / 拖动排序 / 权重加减，逻辑都在 chip_panel.js
+  st.chips = new ChipList(node, {
+    state: st,
+    list,
+    countEl: st.status,
+    undoBtn: st.undoBtn,
+    hint: "在上面的编辑框里输入提示词，这里会按标点拆成可点的片段",
+    getText: () => String(getWidget(node, "text")?.value ?? ""),
+    writeText: (text) => writeText(node, text),
+    writeMask: (arr) => writeMask(node, arr),
+    after: () => render(node),
+  });
 
   if (node.size && node.size[1] < MIN_NODE_H) node.size[1] = MIN_NODE_H;
 
