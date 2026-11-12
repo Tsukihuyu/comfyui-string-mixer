@@ -20,6 +20,20 @@ It is a small toolkit that grew out of real use. I hope it makes your ComfyUI wo
 
 ---
 
+## Changelog
+
+### 1.3.0 — chips became editable, and pinnable
+
+- **Edit a chip in place**: double-click a chip and it turns into a wrapping editor that grows with the text (long segments are no longer squeezed into a narrow slit). Only that segment is replaced; every other character stays put. `Esc` cancels, clearing deletes it.
+- **Insert in empty space**: double-click between chips, after the last chip of a row, or in the empty area below them to add a new segment at the nearest gap; a thin line marks the insertion point on hover.
+- **Per-chip lock**: the small padlock at the far left (cyan = pinned, grey-green = free). A pinned segment cannot be deleted with ×, emptied by hand, removed by ✕ clear, overwritten by an upstream text, or duplicated by reservoir absorbing. Locking never forces output — a pinned segment that is switched off still stays out of the result.
+- **Colour fade**: the on/off switch fades between green and red over 0.28 s.
+- **Fixes**: the Text Gate Toggle node grew by 12 px on every layout pass on some frontends; long chips collapsed into a one-line editor; chip gaps 6 px → 8 px.
+
+Older versions: [commit history](https://github.com/Tsukihuyu/comfyui-string-mixer/commits/main).
+
+---
+
 ## Contents
 
 Install · Node overview · Text Gate · Text Gate Toggle · Prompt Toggle · Text Mix 3/5/7 · Prompt Cleaner · Prompt File · Camera Rig · Skill Writer / Skill Layout · SkillPrompt setup
@@ -104,8 +118,10 @@ This is Text Gate combined with Prompt Toggle. It receives upstream text *and* s
 Its defining behaviour: **the node decides by whether you have interfered with the text, not merely by whether the box is empty.**
 
 - **Follow automatically**: untouched text is replaced by the latest upstream text on every run.
-- **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on.
+- **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on. The switch fades between green and red (0.28 s), so you can see the node react.
 - **Edit a chip in place**: double-click a chip and it becomes an input box; Enter (or clicking elsewhere) replaces only that segment — every other character and delimiter stays put. `Esc` cancels, clearing it deletes the segment.
+- **Insert on double-click in empty space**: double-click the empty space next to the chips (between them, at the end of a row, or below them) and a new segment is inserted at the nearest gap — on by default, and only one delimiter is added. Hovering the empty space shows a thin line marking the insertion point.
+- **Per-chip lock**: the small padlock at the far left of a chip is the highest authority. A pinned segment cannot be deleted with ×, emptied by hand, removed by the ✕ clear, overwritten by an upstream text, or duplicated by reservoir absorbing. Locking protects against deletion only — it does not force the segment into the output. When new text arrives, a pinned word follows the new text's position if present there, and is appended to the very end if absent.
 - **Chip weight**: `＋` / `－` on the left of a chip adjusts its weight and writes the result into the text box; a LoRA segment has its own strength field adjusted instead.
 - **Drag to reorder**: hold a chip, drag it, release — the text box is reordered and the switch and weight travel with that word.
 - **Edit by hand**: changing the text or deleting a chip puts the node into manual takeover.
@@ -141,6 +157,7 @@ Prompt Toggle recognises independent segments and turns them into interactive ch
 
 - **Enable/disable per chip**: click a chip to decide whether it takes part in the output.
 - **Edit in place**: double-click a chip to rewrite that one segment; `Esc` cancels, clearing it deletes the segment.
+- **Insert in the empty space**: double-click the gap between chips to add a new segment there (on by default).
 - **The text is kept**: a disabled chip is not deleted; switch it back on and it returns.
 - **Delete for real**: remove a chip you no longer want, with a short undo window.
 - **Chip weight**: `＋` / `－` on the left add or subtract 0.05; a bare word becomes `(blue hair:1.15)` and goes back to bare form at 1.00.

@@ -91,3 +91,31 @@ def _split_segments(s):
     if pos < len(s):
         segments.append(("text", s[pos:]))
     return segments
+
+# ---------------------------------------------------------------------------
+# 词条归一化与追加分隔符（闸门 / 炸词 / 逐词锁共用）
+# 放在最底层模块里：gates.py 依赖 toggle.py，若这些函数留在 gates 里，
+# toggle 想用就得反向 import，形成循环。
+# ---------------------------------------------------------------------------
+
+def seg_key(body):
+    """段的归一键：大小写折叠、下划线当空格、连续空白压缩（刻意不剥权重）。
+
+    * "Blue_Hair" 与 "blue hair" -> 同一段
+    * "(blue hair:1.1)" 与 "blue hair" -> 两段（上游改权重算另一个词）
+    蓄水账本和逐词锁都按这个键认词。
+    """
+    return " ".join(str(body).casefold().replace("_", " ").split())
+
+
+def append_chunk(body, tail):
+    """给前端的追加串：带上分隔符，直接接在框内文本末尾。"""
+    raw = str(body or "")
+    if not raw.strip():
+        return tail
+    if raw.rstrip(" 	").endswith("\n"):
+        return tail  # 框里已经是换行结尾：新词另起一行
+    t = raw.rstrip()
+    if t[-1] in ",，;；" or t[-1] in ".。!！?？":
+        return " " + tail
+    return ", " + tail

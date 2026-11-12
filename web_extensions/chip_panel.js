@@ -20,13 +20,23 @@ const WEIGHT_STEP = 0.05; // 与后端 nodes/toggle.py 的 WEIGHT_STEP 对齐
 const STYLE_ID = "sm-chip-style";
 
 const CSS = `
-.sm-list { position: relative; }
+.sm-list { position: relative; cursor: text; }
+/* 空白处双击插入的悬停竖线：绝对定位、不吃指针事件，只在缝上亮起来 */
+.sm-gap-bar {
+  position: absolute; width: 2px; border-radius: 1px; opacity: 0;
+  background: rgba(140, 180, 255, 0.8); pointer-events: none;
+  transition: opacity .12s ease; z-index: 1;
+}
+.sm-gap-bar.on { opacity: 1; }
 .smchip {
   display: inline-flex; align-items: stretch;
   font-size: 12px; line-height: 17px; padding: 1px 6px 1px 3px; border-radius: 11px;
   cursor: pointer; max-width: 100%; white-space: normal; word-break: break-word;
   text-align: left; border: 1px solid transparent; font-weight: 500;
-  transition: filter .12s ease, opacity .12s ease, border-color .12s ease;
+  /* 绿↔红要「淡」过去：颜色属性全部参与过渡，开关一下能看出插件干了活。
+     前提是开关时元素不重建——见 paintChips()。 */
+  transition: background-color .28s ease, border-color .28s ease, color .28s ease,
+              filter .12s ease, opacity .12s ease;
   font-family: inherit; user-select: none;
 }
 .smchip:hover { filter: brightness(1.3); }
@@ -77,14 +87,33 @@ const CSS = `
 /* 拖动预览：被拖的词片半透明，并实时插到目标位置，把两边的词挤开（不用落点线） */
 .sm-hint { font-size: 11px; opacity: .55; padding: 4px 2px; }
 
-/* 双击就地编辑：词片本体换成一个输入框，宽度跟着内容走（颜色仍继承开/关的红绿） */
-.smchip.editing { cursor: text; }
+/* 双击就地编辑 / 插入用的框：textarea，随内容换行长高（单行短词就是一行高，外观不变） */
 .smchip .smchip-edit {
   align-self: center; min-width: 48px; max-width: 100%;
-  font: inherit; font-size: 12px; line-height: 15px;
+  font: inherit; font-size: 12px; line-height: 17px; /* 与 .smchip 一致：进编辑时高度不跳 */
   color: inherit; background: rgba(0,0,0,.35);
   border: 1px solid currentColor; border-radius: 7px;
   padding: 0 4px; margin: 0; outline: none; box-sizing: border-box;
+  display: block; resize: none; overflow: hidden;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+}
+.smchip.editing { cursor: text; }
+
+/* 逐词锁：词片最左的小锁。同一个闭合挂锁图案，只差颜色：
+   已锁 = 青蓝实心 + 锁孔；未锁 = 灰绿淡填充。拒绝删除时闪一下（.deny），不弹窗。 */
+.smchip .smlock {
+  align-self: center; display: flex; align-items: center;
+  width: 12px; height: 13px; padding: 0 3px 0 1px; margin-right: 4px;
+  opacity: .85; cursor: pointer; flex: 0 0 auto; transition: opacity .12s ease;
+}
+.smchip .smlock:hover { opacity: 1; }
+.smchip .smlock.on { opacity: 1; }
+.smchip .smlock svg { display: block; width: 11px; height: 12px; }
+.smchip .smlock.deny { animation: smlock-deny .32s ease; }
+@keyframes smlock-deny {
+  0%, 100% { transform: translateX(0); opacity: 1; }
+  25% { transform: translateX(-2px); }
+  60% { transform: translateX(2px); }
 }
 `;
 
@@ -101,6 +130,20 @@ function fmtWeight(w) {
   if (!Number.isFinite(n)) return "1";
   return String(Number(n.toFixed(2)));
 }
+
+// 逐词锁的两个形态（选定方案 D）：同一个闭合挂锁图案，只差颜色与填充。
+//   已锁 = 青蓝 #7dd3fc 实心 + 锁孔；未锁 = 灰绿 #9fb8a6 描边 + 18% 淡填充。
+// 用固定色而不是 currentColor：锁表达"权限"，不该跟着词片的绿/红一起变。
+const LOCK_SVG_ON = `<svg viewBox="0 0 11 12" fill="none" stroke-linecap="round" aria-hidden="true">
+  <rect x="1.2" y="5" width="8.6" height="6.1" rx="1.6" fill="#7dd3fc" fill-opacity=".85" stroke="#7dd3fc" stroke-width="1.7"/>
+  <path d="M3.15 5V3.5a2.35 2.35 0 0 1 4.7 0V5" stroke="#7dd3fc" stroke-width="1.7"/>
+  <circle cx="5.5" cy="8.1" r="0.95" fill="#0b2733" stroke="#7dd3fc" stroke-width="1.7"/>
+</svg>`;
+const LOCK_SVG_OFF = `<svg viewBox="0 0 11 12" fill="none" stroke-linecap="round" aria-hidden="true">
+  <rect x="1.2" y="5" width="8.6" height="6.1" rx="1.6" fill="#9fb8a6" fill-opacity=".18" stroke="#9fb8a6" stroke-width="1.6"/>
+  <path d="M3.15 5V3.5a2.35 2.35 0 0 1 4.7 0V5" stroke="#9fb8a6" stroke-width="1.6"/>
+  <circle cx="5.5" cy="8.1" r="0.95" fill="none" stroke="#9fb8a6" stroke-width="1.6"/>
+</svg>`;
 
 // 指针落在哪个位置：在「拖动开始时冻结的矩形」里找，返回摘掉被拖那一个之后应插入的下标。
 // 为什么用冻结坐标：预览会实时重排词片，拿实时布局算落点就会跟手指互相推让、来回跳；
@@ -135,13 +178,47 @@ export class ChipList {
     this.node = node;
     this.opts = opts;
     this.drag = null;
-    this.editing = null;   // {i, box, input, seg} 正在编辑的那一段
+    this.editing = null;   // {mode:"edit"|"insert", i|k, box, input, seg} 正在编辑/插入的那一段
     this.clickTimer = null; // 待生效的单击开关（双击判定窗口内先压着）
     this.lastClick = null;  // {i, t, seg} 上一次单击
     this.undoState = null;
     this.undoTimer = null;
+    this.gapBar = null;     // 空白处双击插入的悬停竖线
+    this.gapAt = -1;
+    // 逐词锁：按归一化词键存（不是位置），所以文本重排/去重之后锁还认得住那个词
+    this.pins = new Set(Array.isArray(opts.readPins?.()) ? opts.readPins() : []);
     ensureChipStyles();
-    if (opts.list) opts.list.classList.add("sm-list");
+    if (opts.list) {
+      opts.list.classList.add("sm-list");
+      this.bindListGestures(opts.list);
+    }
+  }
+
+  // 词片区容器自己的手势：悬停提示 + 双击空白插入。
+  // 容器从不重建（只换子节点），所以这里的 dblclick 是浏览器原生判定，不用压 220ms。
+  bindListGestures(list) {
+    list.addEventListener("pointermove", (e) => this.onHover(e));
+    list.addEventListener("pointerleave", () => this.hideGapBar());
+    list.addEventListener("dblclick", (e) => {
+      if (this.drag || this.editing) return;
+      if (e.target?.closest?.(".smchip")) return; // 双击词片 = 改词，别抢
+      e.preventDefault();
+      e.stopPropagation();
+      const rects = this.chipRects();
+      if (!rects.length) {
+        this.beginInsert(0); // 空文本：新建第一段
+        return;
+      }
+      this.beginInsert(slotFromRects(rects, -1, e.clientX, e.clientY));
+    });
+  }
+
+  chipEls() {
+    return Array.from(this.opts.list?.querySelectorAll(".smchip") || []);
+  }
+
+  chipRects() {
+    return this.chipEls().map((el) => el.getBoundingClientRect());
   }
 
   get st() {
@@ -153,32 +230,150 @@ export class ChipList {
     return mask[i] !== 0;
   }
 
+  // ---------------------------------------------------------------- 逐词锁
+
+  // 这一段是不是被钉住了。键由后端给（st.keys），前端不自己算，避免两套归一化漂移。
+  isPinned(i) {
+    const key = (this.st.keys || [])[i];
+    return !!key && this.pins.has(key);
+  }
+
+  // 钉住的段（键 + 原文），按当前顺序：注入 prompt、换词补位都用它
+  pinsPairs() {
+    const segs = this.st.segs || [];
+    return segs
+      .map((body, i) => [this.st.keys?.[i], body])
+      .filter(([key]) => key && this.pins.has(key));
+  }
+
+  pinKeys() {
+    return this.pinsPairs().map(([key]) => key);
+  }
+
+  // 只剩锁定词（清空之后）——闸门要靠它把这种状态当成"框是空的"
+  lockedOnly() {
+    const segs = this.st.segs || [];
+    return segs.length > 0 && this.isPinned(0) && segs.every((_s, i) => this.isPinned(i));
+  }
+
+  togglePin(i) {
+    const key = (this.st.keys || [])[i];
+    if (!key) return;
+    if (this.pins.has(key)) this.pins.delete(key);
+    else this.pins.add(key);
+    this.opts.writePins?.([...this.pins]);
+    this.render();               // 锁图标要换成另一个形态，重画一次最省事
+    this.opts.after?.();
+  }
+
+  // 拒绝删除时：锁图标晃一下，不弹窗也不改任何状态
+  denyLock(i) {
+    const el = this.opts.list?.querySelector(`.smchip[data-i="${i}"] .smlock`);
+    if (!el) return;
+    el.classList.remove("deny");
+    void el.offsetWidth;         // 强制回流，让同一个动画能再放一次
+    el.classList.add("deny");
+    setTimeout(() => el.classList.remove("deny"), 360);
+  }
+
+  // 清空框：只留锁定词（后端算，标点规则和删词同一套）
+  async keepOnlyPinned() {
+    const keys = this.pinKeys();
+    if (!keys.length) return null;
+    const text = this.opts.getText();
+    try {
+      const res = await api.fetchApi(
+        `/prompt_toggle/split?text=${encodeURIComponent(text)}&keep=${encodeURIComponent(JSON.stringify(keys))}`,
+        { cache: "no-store" },
+      );
+      const data = await res.json();
+      return typeof data.text === "string" ? data : { text: "" };
+    } catch (e) {
+      console.warn("[String-Mixer] 清空保锁失败：", e);
+      return null;
+    }
+  }
+
   // ---------------------------------------------------------------- 渲染
 
   render() {
     if (this.drag?.moved) return; // 拖动中别重画，会打断手势
     if (this.editing) return;     // 编辑中别重画：一重画输入框和光标就没了
-    const { list, countEl } = this.opts;
+    const { list } = this.opts;
     if (!list) return;
     const st = this.st;
     const segs = st.segs || [];
     const weights = st.weights || [];
 
-    if (countEl) {
-      const on = segs.reduce((n, _, i) => n + (this.isOn(i) ? 1 : 0), 0);
-      countEl.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
-      if (countEl.dataset) countEl.dataset.off = segs.length && on === 0 ? "1" : "";
-    }
+    this.updateCount();
 
     if (!segs.length) {
       const hint = document.createElement("div");
       hint.className = "sm-hint";
       hint.textContent = this.opts.hint || "框里有字后，这里会按标点炸成可点的片段";
       list.replaceChildren(hint);
+      this.restoreGapBar();
       return;
     }
 
     list.replaceChildren(...segs.map((seg, i) => this.chipEl(seg, i, weights[i])));
+    this.restoreGapBar(); // replaceChildren 会把悬停竖线一起清掉，这里挂回来
+  }
+
+  updateCount() {
+    const { countEl } = this.opts;
+    if (!countEl) return;
+    const segs = this.st.segs || [];
+    const on = segs.reduce((n, _, i) => n + (this.isOn(i) ? 1 : 0), 0);
+    countEl.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
+    if (countEl.dataset) countEl.dataset.off = segs.length && on === 0 ? "1" : "";
+  }
+
+  // 词片 class 的唯一来源：整排重建（render）和就地换色（paintChips）都调这里，
+  // 两条路径就不可能给出两种颜色。
+  chipClass(i) {
+    const w = Number(this.st.weights?.[i]);
+    const ww = Number.isFinite(w) ? w : 1;
+    return `smchip ${this.isOn(i) ? "on" : "off"}${ww !== 1 ? " wtd" : ""}`;
+  }
+
+  // 悬停提示同理：就地换色不重建元素，title 也得跟着改，否则开关后提示还写着旧动作
+  chipTitle(i) {
+    return [
+      this.isOn(i) ? "单击关掉这一段（不进输出）" : "单击打开这一段",
+      "双击 = 就地改这个词",
+      "按住拖动 = 换位置",
+      "左侧 ＋/－ = 权重 ±0.05",
+      "右侧 × = 从文本框里删掉（可撤销）",
+    ].join("；");
+  }
+
+  // 就地换色：只改现有词片的 class、不重建元素，CSS 过渡才有起点（绿↔红淡过去的基础）。
+  // 段数对不上（文本被改过）就跑不动了，只能退回整排重建。
+  paintChips() {
+    const list = this.opts.list;
+    const segs = this.st.segs || [];
+    if (!list || this.editing) return this.render();
+    const els = Array.from(list.querySelectorAll(".smchip"));
+    if (els.length !== segs.length) return this.render();
+    els.forEach((el, i) => {
+      const cls = this.chipClass(i);
+      if (el.className !== cls) el.className = cls;
+      const tip = this.chipTitle(i);
+      if (el.title !== tip) el.title = tip;
+    });
+    this.updateCount();
+  }
+
+  // 批量改开关（全开 / 全关 / 反选）：同样就地换色，一排一起淡过去
+  applyMask(arr) {
+    if (!Array.isArray(arr)) return;
+    this.cancelPendingClick();
+    this.lastClick = null;
+    this.st.mask = arr;
+    this.opts.writeMask(arr);
+    this.paintChips();
+    this.opts.after?.();
   }
 
   chipEl(seg, i, weight) {
@@ -187,14 +382,23 @@ export class ChipList {
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.i = String(i);
-    b.className = `smchip ${on ? "on" : "off"}${w !== 1 ? " wtd" : ""}`;
-    b.title = [
-      on ? "单击关掉这一段（不进输出）" : "单击打开这一段",
-      "双击 = 就地改这个词",
-      "按住拖动 = 换位置",
-      "左侧 ＋/－ = 权重 ±0.05",
-      "右侧 × = 从文本框里删掉（可撤销）",
-    ].join("；");
+    b.className = this.chipClass(i);
+    b.title = this.chipTitle(i);
+
+    const lock = document.createElement("span");
+    const pinned = this.isPinned(i);
+    lock.className = `smlock${pinned ? " on" : ""}`;
+    lock.innerHTML = pinned ? LOCK_SVG_ON : LOCK_SVG_OFF;
+    lock.title = pinned
+      ? "已钉住：不会被 × / 双击清空 / ✕ 清空框 / 换词 / 蓄水删掉（点一下解开）"
+      : "点一下钉住这一段（最高权限：不被删除、不被清空、不被换词冲掉）";
+    lock.setAttribute("role", "button");
+    lock.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); });
+    lock.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.togglePin(i);
+    });
 
     const col = document.createElement("span");
     col.className = "wcol";
@@ -207,7 +411,7 @@ export class ChipList {
     lbl.className = "lbl";
     lbl.textContent = seg;
 
-    const kids = [col, lbl];
+    const kids = [lock, col, lbl];
     if (w !== 1) {
       const badge = document.createElement("span");
       badge.className = "wbadge";
@@ -267,6 +471,7 @@ export class ChipList {
     e.preventDefault();
     e.stopPropagation();
     const chip = e.currentTarget;
+    this.hideGapBar(); // 开始按下词片：插入竖线让位
     const list = this.opts.list;
     // 冻结此刻每个词片在屏幕上的矩形：预览重排会让布局变化，落点必须拿冻结坐标算
     const chips = Array.from(list.querySelectorAll(".smchip"));
@@ -379,38 +584,53 @@ export class ChipList {
     if ((this.st.segs || [])[l.i] === l.seg) this.toggle(l.i);
   }
 
-  // ---------------------------------------------------------------- 双击就地编辑
+  // ---------------------------------------------------------------- 双击就地编辑 / 双击空白插入
 
-  beginEdit(i) {
+  // 造一个就地输入框（改词和新插入共用同一份行为：Enter 提交 / Esc 取消 / 失焦提交 / 中文输入法保护）
+  // 用 textarea 而不是 input：input 是单行控件，长词折成两行以上时编辑只能看到一条窄缝。
+  makeInput(initial, placeholder, minWidth = 160) {
+    const el = document.createElement("textarea");
+    el.className = "smchip-edit";
+    el.value = initial;
+    if (placeholder) el.placeholder = placeholder;
+    el.spellcheck = false;
+    el.autocomplete = "off";
+    el.rows = 1;
+    el.wrap = "soft";
+    el.style.visibility = "hidden"; // 先进 DOM 量尺寸，量完整再露出来（否则会闪一帧矮框）
+
     const list = this.opts.list;
-    const seg = (this.st.segs || [])[i];
-    if (this.editing || seg == null || !list) return;
-    const chip = list.querySelector(`.smchip[data-i="${i}"]`);
-    if (!chip) return;
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "smchip-edit";
-    input.value = seg;              // 原文整段交给你改（(cat:1.2) 连括号一起）
-    input.spellcheck = false;
-    input.autocomplete = "off";
-
-    // 输入框宽度跟着内容走：用 canvas 量（输入框自己的 scrollWidth 要等布局）
-    const fitWidth = () => {
-      const cs = getComputedStyle(input);
+    // 宽度跟着内容走（按最长一行量），夹在 [minWidth, 词片区可用宽]；高度跟着折行数长
+    const fit = () => {
+      const cs = getComputedStyle(el);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 2; // +2 边框
       const ctx = (this._measure ||= document.createElement("canvas").getContext("2d"));
-      if (!ctx) return;
-      ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-      const w = ctx.measureText(input.value || " ").width;
-      input.style.width = `${Math.min(240, Math.max(48, Math.ceil(w) + 18))}px`;
+      const maxW = Math.max(120, (list?.clientWidth || 300) - 8);
+      let w = minWidth;
+      if (ctx) {
+        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const longest = String(el.value || placeholder || "新词")
+          .split("\n")
+          .reduce((m, line) => Math.max(m, ctx.measureText(line).width), 0);
+        w = Math.max(minWidth, Math.ceil(longest) + padX);
+      }
+      el.style.width = `${Math.min(maxW, w)}px`;
+
+      // 高度：先归零再读 scrollHeight；不超过词片区可视高度，超了框内滚动
+      const maxH = Math.max(40, (list?.clientHeight || 200) - 4);
+      el.style.height = "auto";
+      const need = el.scrollHeight + 2; // scrollHeight 不含边框
+      el.style.height = `${Math.min(maxH, need)}px`;
+      el.style.overflowY = need > maxH ? "auto" : "hidden";
     };
 
     // chip 的手势处理器会 preventDefault，光标和选区会被一起吃掉 -> 这里拦住
-    input.addEventListener("pointerdown", (e) => e.stopPropagation());
-    input.addEventListener("mousedown", (e) => e.stopPropagation());
-    input.addEventListener("keydown", (e) => {
+    el.addEventListener("pointerdown", (e) => e.stopPropagation());
+    el.addEventListener("mousedown", (e) => e.stopPropagation());
+    el.addEventListener("keydown", (e) => {
       if (e.isComposing || e.keyCode === 229) return; // 输入法组字中，别当提交
       if (e.key === "Enter") {
+        // 换行不在这里做：提示词里的换行本身也是分隔符，要拆词直接输逗号
         e.preventDefault();
         e.stopPropagation();
         this.finishEdit(true);
@@ -420,20 +640,17 @@ export class ChipList {
         this.finishEdit(false);
       }
     });
-    input.addEventListener("input", () => fitWidth());
-    input.addEventListener("blur", () => {
+    el.addEventListener("input", () => fit());
+    el.addEventListener("blur", () => {
       if (this.editing) this.finishEdit(true); // 点到别处也算提交
     });
+    return { input: el, fit };
+  }
 
-    // <button> 里不能塞 <input>（交互元素套交互元素，浏览器会闹脾气），
-    // 所以编辑期间把一个同色的 <div> 换上去，退出编辑后整体重画。
-    const box = document.createElement("div");
-    box.className = `${chip.className.replace(/\bediting\b/g, "").trim()} editing`;
-    box.dataset.i = String(i);
-    box.append(input);
-    chip.replaceWith(box);
-
-    this.editing = { i, box, input, seg };
+  // 编辑框挂进词片区，成为这一轮编辑的当前框
+  mountEditor(ed, box, fit, selectAll) {
+    this.editing = ed;
+    this.hideGapBar(); // 竖线让位给输入框
 
     // 编辑期间点面板任何其它地方 = 提交（blur 在 preventDefault 的手势里不一定来）
     this._outside = (e) => {
@@ -447,9 +664,59 @@ export class ChipList {
     };
     document.addEventListener("pointerdown", this._outside, true);
 
-    input.focus();
-    input.select();
-    fitWidth();
+    ed.input.focus();
+    if (selectAll) ed.input.select();
+    fit();                              // 先在隐藏状态量好宽高，避免闪一帧矮框
+    ed.input.style.visibility = "";
+    // 词片区可滚动：框可能落在可视区外，滚一把否则看着像没反应
+    requestAnimationFrame(() => box.scrollIntoView?.({ block: "nearest" }));
+  }
+
+  beginEdit(i) {
+    const list = this.opts.list;
+    const seg = (this.st.segs || [])[i];
+    if (this.editing || seg == null || !list) return;
+    const chip = list.querySelector(`.smchip[data-i="${i}"]`);
+    if (!chip) return;
+
+    // 起始宽度 = 原词片的文字宽度：同样的字、同样的宽，进编辑时字形不会跳
+    const cs = getComputedStyle(chip);
+    const innerW = Math.max(
+      64,
+      chip.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0),
+    );
+    const { input, fit } = this.makeInput(seg, "", innerW);
+    // <button> 里不能塞 <textarea>（交互元素套交互元素，浏览器会闹脾气），
+    // 所以编辑期间把一个同色的 <div> 换上去，退出编辑后整体重画。
+    const box = document.createElement("div");
+    box.className = `${chip.className.replace(/\bediting\b/g, "").trim()} editing`;
+    box.dataset.i = String(i);
+    box.append(input);
+    chip.replaceWith(box);
+    this.mountEditor({ mode: "edit", i, box, input, seg }, box, fit, true);
+  }
+
+  // 双击词片之间的空白：在这个位置开一个空框，写进去的词插进文本同一位置。
+  // k = 插到第几段之前（k 等于段数就是追加到末尾）。
+  beginInsert(k) {
+    const list = this.opts.list;
+    if (this.editing || !list) return;
+    const segs = this.st.segs || [];
+    const at = Math.max(0, Math.min(segs.length, k | 0));
+
+    const { input, fit } = this.makeInput("", "输入新词…");
+    const box = document.createElement("div");
+    box.className = "smchip on editing"; // 新词默认开启：先长成绿的，写进去就是绿的
+    box.dataset.insert = String(at);
+    box.append(input);
+
+    list.querySelector(".sm-hint")?.remove(); // 空文本时那块提示让位给输入框
+    const chips = this.chipEls();
+    const next = chips[at] || null;
+    if (next) list.insertBefore(box, next);
+    else list.appendChild(box);
+
+    this.mountEditor({ mode: "insert", k: at, box, input, seg: "" }, box, fit, false);
   }
 
   detachOutside() {
@@ -467,17 +734,22 @@ export class ChipList {
     ed.box.classList.remove("editing");
     ed.box.remove();       // 原地留个空位，随后的 render 会把整排词重画
 
-    if (!commit) {
+    const clean = val.trim();
+    if (!commit || clean === ed.seg) {
       this.render();
       return;
     }
-    const clean = val.trim();
-    if (clean === ed.seg) {
-      this.render();
+    if (ed.mode === "insert") {
+      this.insert(ed.k, clean); // 插入框里空着提交 = 什么都不插（上面的 clean === seg 已经挡了）
       return;
     }
     if (!clean) {
+      const wasPinned = ed.mode !== "insert" && this.isPinned(ed.i);
       this.render();
+      if (wasPinned) {         // 钉住的段也不许"改成空"来删
+        this.denyLock(ed.i);
+        return;
+      }
       this.del(ed.i);      // 清空 = 删掉这一段（带撤销）
       return;
     }
@@ -507,6 +779,89 @@ export class ChipList {
     this.applyNew(data, mask);
   }
 
+  // 插一段：新词落在第 k 段之前，只多一个分隔符；mask 在同一位插一个 1（默认开）
+  async insert(k, body) {
+    const data = await this.mutate(`insert=${k},${encodeURIComponent(body)}`);
+    if (!data) {
+      this.render();
+      return;
+    }
+    this.pushUndo();
+    const oldMask = this.st.mask || [];
+    const n = (this.st.segs || []).length;
+    // 新词里带逗号会炸成好几段：按实际增加的段数补 1
+    const add = Math.max(1, (data.segments || []).length - n);
+    const at = Math.max(0, Math.min(n, k));
+    const mask = [
+      ...oldMask.slice(0, at),
+      ...Array(add).fill(1),
+      ...oldMask.slice(at),
+    ];
+    this.applyNew(data, mask);
+  }
+
+  // ---------------------------------------------------------------- 空白处插入：悬停竖线
+
+  ensureGapBar() {
+    const list = this.opts.list;
+    if (!list) return null;
+    if (!this.gapBar || !this.gapBar.isConnected) {
+      const bar = document.createElement("div");
+      bar.className = "sm-gap-bar";
+      list.appendChild(bar);
+      this.gapBar = bar;
+    }
+    return this.gapBar;
+  }
+
+  restoreGapBar() {
+    this.ensureGapBar();
+    this.gapAt = -1;
+    if (this.gapBar) this.gapBar.classList.remove("on");
+  }
+
+  hideGapBar() {
+    this.gapAt = -1;
+    if (this.gapBar) this.gapBar.classList.remove("on");
+  }
+
+  onHover(e) {
+    if (this.drag || this.editing) return this.hideGapBar();
+    if (e.target?.closest?.(".smchip")) return this.hideGapBar(); // 在词片上不提示
+    const els = this.chipEls();
+    if (!els.length) return this.hideGapBar(); // 空文本：没有缝可提示
+    const rects = els.map((el) => el.getBoundingClientRect());
+    this.showGapBar(els, slotFromRects(rects, -1, e.clientX, e.clientY));
+  }
+
+  // 竖线画在「前一个词片之后」的那条缝上（插入点落在行边界时也这样，看着最顺）。
+  // 位置用 offsetLeft/offsetTop 算：它们相对 .sm-list，滚动 container 里也不会错。
+  showGapBar(els, k) {
+    const list = this.opts.list;
+    const bar = this.ensureGapBar();
+    if (!bar || !list) return;
+    const prev = k > 0 ? els[k - 1] : null;
+    const next = els[k] || null;
+    if (!prev && !next) return this.hideGapBar();
+    const gap = parseFloat(getComputedStyle(list).columnGap) || 8;
+    const half = gap / 2;
+    let left, top, height;
+    if (prev) {
+      left = prev.offsetLeft + prev.offsetWidth + half - 1;
+      top = prev.offsetTop;
+      height = prev.offsetHeight;
+    } else {
+      left = Math.max(0, next.offsetLeft - half - 1);
+      top = next.offsetTop;
+      height = next.offsetHeight;
+    }
+    bar.style.left = `${Math.round(left)}px`;
+    bar.style.top = `${Math.round(top)}px`;
+    bar.style.height = `${Math.round(height)}px`;
+    bar.classList.add("on");
+    this.gapAt = k;
+  }
+
   // ---------------------------------------------------------------- 操作
 
   toggle(i) {
@@ -516,11 +871,15 @@ export class ChipList {
     mask[i] = mask[i] ? 0 : 1;
     st.mask = mask;
     this.opts.writeMask(mask);
-    this.render();
+    this.paintChips();   // 就地换色：绿↔红淡过去，不重建元素
     this.opts.after?.();
   }
 
   async del(i) {
+    if (this.isPinned(i)) {        // 钉住的段删不掉：晃一下锁图标就完事
+      this.denyLock(i);
+      return;
+    }
     const data = await this.mutate(`drop=${i}`);
     if (!data) return;
     this.pushUndo();
@@ -601,6 +960,7 @@ export class ChipList {
     const st = this.st;
     const segs = data.segments || [];
     st.segs = segs;
+    st.keys = data.keys || [];
     st.weights = data.weights || [];
     st.mask = Array.isArray(mask) && mask.length === segs.length
       ? mask

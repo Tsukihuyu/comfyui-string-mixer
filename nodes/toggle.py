@@ -6,7 +6,7 @@ import json
 import re
 
 from ._runtime import PromptServer, web
-from .textscan import _split_segments, protected_mask
+from .textscan import _split_segments, append_chunk, protected_mask, seg_key
 
 # ---------------------------------------------------------------------------
 # PromptToggle -> Prompt Toggle：按标点把提示词拆成片段，逐段开关
@@ -345,6 +345,112 @@ def edit_segment(text, index, new_body, pairs=None):
     return text[:start] + clean + text[end:]
 
 
+def insert_segment(text, index, body, pairs=None):
+    """在第 index 段之前插入新的一段，其余字符一个都不动。
+
+    只额外产生「新词 + 一个分隔符」，原文的标点、空格、别的段原样活着：
+      k == 0        -> 新词放在最前
+      0 < k < n     -> 原文该位置已有的分隔符留着，新词塞在它和下一段之间
+      k >= n        -> 追加到末尾（前一段是冒号标签就只隔一个空格）
+    空文本 -> 新词就是全文（等于新建第一段）。空 body 什么都不做。
+    前端「双击词片之间的空白」走这里（/prompt_toggle/split?insert=k,新词）。
+    """
+    clean = (body or "").strip()
+    if not clean:
+        return text
+    segs = list(pairs) if pairs is not None else split_spans(text)
+    if not segs:  # 空文本：新词就是全部
+        return clean
+    try:
+        k = max(0, min(len(segs), int(index)))
+    except (TypeError, ValueError):
+        k = len(segs)
+    # 新词后面跟什么：冒号标签后面只能隔空格，其它按逗号
+    after = " " if is_colon_tail(clean) else ", "
+
+    if k == 0:
+        return clean + after + text
+
+    if k >= len(segs):  # 追加：别在原本就以分隔符结尾的文本后面再叠一个
+        head = text.rstrip()
+        if head and head[-1] in SPLIT_CHARS:
+            return head + " " + clean
+        sep = " " if is_colon_tail(segs[-1][0]) else ", "
+        return text + sep + clean
+
+    start = segs[k][2]
+    return text[:start] + clean + after + text[start:]
+
+
+def parse_pins(blob):
+    """把前端注入的锁定词解析成 [(key, body), ...]（顺序即原词片顺序）。
+
+    接受的形态：[[key, body], ...] 或 [{"key":…, "body":…}, …]。
+    解析不了就当没有锁——宁可少锁，也不要把整段提示词搞乱。
+    """
+    try:
+        raw = json.loads(blob) if blob else None
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            key, body = item[0], item[1]
+        elif isinstance(item, dict):
+            key, body = item.get("key"), item.get("body")
+        else:
+            continue
+        key = str(key or "").strip()
+        body = str(body or "").strip()
+        if key and body:
+            out.append((key, body))
+    return out
+
+
+def keep_pinned(text, keys, pairs=None):
+    """只保留锁定的段，其余删掉（手动清空框时用）。
+
+    分隔符沿用原文里幸存段的那个（删掉一段就连它的分隔符一起收掉），
+    第一段不继承被删段留下的逗号——和 drop_segment 同一套规则。
+    """
+    wanted = set(str(k) for k in (keys or []))
+    if not wanted:
+        return ""
+    segs = list(pairs) if pairs is not None else split_spans(text)
+    kept = [(body, before) for body, before, _s, _e in segs if seg_key(body) in wanted]
+    if not kept:
+        return ""
+    out = kept[0][0]
+    for i in range(1, len(kept)):
+        body, before = kept[i]
+        prev = kept[i - 1][0]
+        if is_colon_tail(prev):
+            sep = " "
+        elif is_colon_tail(body):
+            sep = ". "
+        else:
+            sep = before or ""
+        out += sep + body
+    return out.strip()
+
+
+def merge_pins(text, pins, pairs=None):
+    """保证每个锁定段都在 text 里：缺的按 pins 的顺序追加到末尾。
+
+    用在「上游换词」和「蓄水吸收」之后：新词里有同一个锁词 -> 就用新词给的位置，
+    不重复；新词里没有 -> 追加到整篇最后（追加规则与蓄水一致，见 append_chunk）。
+    """
+    body_text = str(text or "")
+    present = {seg_key(body) for body, _b, _s, _e in split_spans(body_text)}
+    missing = [b for key, b in pins if key not in present and b.strip()]
+    out = body_text
+    for b in missing:
+        out = out + str(append_chunk(out, b) or "")
+    return out
+
+
 def merge_upstream(main, upstream):
     """上游在前、本节点结果在后。上游原样保留（不参与开关），空则忽略。"""
     extra = (upstream or "").strip()
@@ -393,6 +499,8 @@ class PromptToggle:
     OUTPUT_NODE = False
 
     def toggle(self, text, join_mode, mask="", upstream=""):
+        # 注意：这里**不能**用 merge_pins 兜锁词——锁词被关掉（红）时它本就不该进输出，
+        # 输出侧再补一遍会把开关语义毁掉。锁词只在「写框」的那些动作里兜（换词 / 清空）。
         return (merge_upstream(apply_toggle(text, mask, join_mode), upstream),)
 
 
@@ -407,6 +515,7 @@ if PromptServer is not None:
           move=<from>,<to>    把第 from 段挪到第 to 位（按住拖动排序）
           weight=<i>,<delta>  给第 i 段加减权重（词片左边的 ＋/－）
           edit=<i>,<新词>     把第 i 段整段换成新词（双击词片就地编辑；只改这一段）
+          insert=<k>,<新词>   在第 k 段之前插入一段（双击词片之间的空白；只插新词和一个分隔符）
         让服务端算，前端就不用自己拼标点，也就不会和 original 模式两套实现。
         """
         text = request.query.get("text", "")
@@ -415,6 +524,8 @@ if PromptServer is not None:
             spans = split_spans(s)
             return {
                 "segments": [body for body, _b, _s, _e in spans],
+                # 归一键：逐词锁按它认词。前端不自己算，避免两套归一化漂移
+                "keys": [seg_key(body) for body, _b, _s, _e in spans],
                 "weights": [round(parse_weight(body)[1], 2) for body, _b, _s, _e in spans],
             }
 
@@ -451,6 +562,31 @@ if PromptServer is not None:
                 new_text = edit_segment(text, int(idx), body)
             except (TypeError, ValueError):
                 pass
+
+        raw_insert = request.query.get("insert")
+        if new_text is None and raw_insert:
+            try:
+                idx, body = raw_insert.split(",", 1)
+                new_text = insert_segment(text, int(idx), body)
+            except (TypeError, ValueError):
+                pass
+
+        # keep=<键的 JSON 数组>：只留锁定的段（✕ 清空框走这里）
+        raw_keep = request.query.get("keep")
+        if new_text is None and raw_keep:
+            try:
+                keys = json.loads(raw_keep)
+            except (TypeError, ValueError):
+                keys = None
+            if isinstance(keys, list):
+                new_text = keep_pinned(text, keys)
+
+        # pins=[[键, 词], …]：保证锁词都在（换新词后把缺失的补到末尾）
+        raw_pins = request.query.get("pins")
+        if new_text is None and raw_pins:
+            pairs = parse_pins(raw_pins)
+            if pairs:
+                new_text = merge_pins(text, pairs)
 
         if new_text is not None and new_text != text:
             payload["text"] = new_text
