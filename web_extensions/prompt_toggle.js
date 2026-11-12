@@ -327,7 +327,7 @@ function setupNode(node) {
   const list = document.createElement("div");
   list.style.cssText =
     "flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;" +
-    "flex-wrap:wrap;gap:6px;align-content:flex-start;padding:2px;";
+    "flex-wrap:wrap;gap:8px;align-content:flex-start;padding:2px;";
   panel.append(bar, list);
 
   const domWidget = node.addDOMWidget("chips", "chips", panel, { serialize: false });

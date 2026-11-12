@@ -106,6 +106,7 @@ Its defining behaviour: **the node decides by whether you have interfered with t
 - **Follow automatically**: untouched text is replaced by the latest upstream text on every run.
 - **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on. The switch fades between green and red (0.28 s), so you can see the node react.
 - **Edit a chip in place**: double-click a chip and it becomes an input box; Enter (or clicking elsewhere) replaces only that segment — every other character and delimiter stays put. `Esc` cancels, clearing it deletes the segment.
+- **Insert on double-click in empty space**: double-click the empty space next to the chips (between them, at the end of a row, or below them) and a new segment is inserted at the nearest gap — on by default, and only one delimiter is added. Hovering the empty space shows a thin line marking the insertion point.
 - **Chip weight**: `＋` / `－` on the left of a chip adjusts its weight and writes the result into the text box; a LoRA segment has its own strength field adjusted instead.
 - **Drag to reorder**: hold a chip, drag it, release — the text box is reordered and the switch and weight travel with that word.
 - **Edit by hand**: changing the text or deleting a chip puts the node into manual takeover.
@@ -141,6 +142,7 @@ Prompt Toggle recognises independent segments and turns them into interactive ch
 
 - **Enable/disable per chip**: click a chip to decide whether it takes part in the output.
 - **Edit in place**: double-click a chip to rewrite that one segment; `Esc` cancels, clearing it deletes the segment.
+- **Insert in the empty space**: double-click the gap between chips to add a new segment there (on by default).
 - **The text is kept**: a disabled chip is not deleted; switch it back on and it returns.
 - **Delete for real**: remove a chip you no longer want, with a short undo window.
 - **Chip weight**: `＋` / `－` on the left add or subtract 0.05; a bare word becomes `(blue hair:1.15)` and goes back to bare form at 1.00.

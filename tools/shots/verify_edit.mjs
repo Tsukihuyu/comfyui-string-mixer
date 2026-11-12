@@ -434,11 +434,214 @@ return { opened, value, chips: __labels(), clip };
 );
 const shotGate = await shot("03-gate-editing.png", gate.clip);
 
+// ---------------------------------------------------------------- 12-15. 空白处双击插入
+const insertSetup = await run(
+  "12-插入场景：窄节点 + 6 段词（强制折行）",
+  `
+app.graph.clear();
+const n = LiteGraph.createNode("PromptToggle");
+app.graph.add(n);
+n.pos = [0, 0];
+n.size[0] = 300;          // 窄一点，逼出多行
+n.size[1] = 420;
+await __wait(1500);
+__setText(n, "alpha, beta, gamma, delta, epsilon, zeta");
+await __wait(1400);
+window.__ins = n;
+app.canvas.ds.scale = 1;
+app.canvas.ds.offset = [-n.pos[0] + 120, -n.pos[1] + 160];
+app.canvas.draw(true);
+await __wait(900);
+const rows = new Map();
+[...n.__pt.list.querySelectorAll(".smchip")].forEach((el, i) => {
+  const r = el.getBoundingClientRect();
+  const key = Math.round(r.top);
+  if (!rows.has(key)) rows.set(key, []);
+  rows.get(key).push(i);
+});
+return {
+  chips: __labels(), width: n.size[0],
+  rows: [...rows.values()],
+  listBox: (() => { const r = n.__pt.list.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; })(),
+  clip: await __place(n, 0),
+};
+`,
+);
+
+const hover = await run(
+  "12b-悬停竖线：指针落在两个词片之间的缝上就亮起来，落在词片上就灭",
+  `
+const n = window.__ins;
+const list = n.__pt.list;
+const chips = [...list.querySelectorAll(".smchip")];
+const r0 = chips[0].getBoundingClientRect();
+const r1 = chips[1].getBoundingClientRect();
+const sameRow = Math.abs(r0.top - r1.top) < 2;
+const gapX = Math.round(sameRow ? (r0.right + r1.left) / 2 : r0.right + 8);
+const gapY = Math.round(r0.top + r0.height / 2);
+list.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: gapX, clientY: gapY }));
+await __wait(120);
+const bar = list.querySelector(".sm-gap-bar");
+const onGap = { on: !!bar?.classList.contains("on"), left: bar ? Math.round(parseFloat(bar.style.left || -1)) : null, height: bar ? Math.round(parseFloat(bar.style.height || -1)) : null };
+// 移到词片上：应熄灭（真实浏览器里 pointermove 的目标是词片；这里也直接派到词片上）
+const c = chips[2].getBoundingClientRect();
+chips[2].dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: Math.round(c.left + 10), clientY: Math.round(c.top + 8) }));
+await __wait(120);
+const onChip = !!bar?.classList.contains("on");
+// 再回到缝上，留给截图
+list.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: gapX, clientY: gapY }));
+await __wait(150);
+return { sameRow, gapX, gapY, onGap, onChip, barOnAgain: !!bar?.classList.contains("on"), clip: await __place(n, 0) };
+`,
+);
+const shotHover = await shot("06-insert-hover.png", hover.clip);
+
+const openBox = await run(
+  "12c-双击缝：该处出现空输入框（带 placeholder），插入下标 = 后一个词片的序号",
+  `
+const n = window.__ins;
+const list = n.__pt.list;
+const chips = [...list.querySelectorAll(".smchip")];
+const r0 = chips[0].getBoundingClientRect();
+const r1 = chips[1].getBoundingClientRect();
+const x = Math.round((r0.right + r1.left) / 2);
+const y = Math.round(r0.top + r0.height / 2);
+list.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }));
+await __wait(200);
+const box = list.querySelector(".smchip.editing");
+const input = box?.querySelector(".smchip-edit");
+return {
+  opened: !!input,
+  insertAt: box?.dataset.insert,
+  placeholder: input?.placeholder,
+  empty: input?.value === "",
+  focused: document.activeElement === input,
+  boxClass: box?.className,
+  barHidden: !list.querySelector(".sm-gap-bar")?.classList.contains("on"),
+  clip: await __place(n, 0),
+};
+`,
+);
+const shotBox = await shot("07-insert-box.png", openBox.clip);
+
+const inserted = await run(
+  "13-提交插入：新词落在中间，其余标点一个不动，新段默认开启",
+  `
+const n = window.__ins;
+const input = n.__pt.list.querySelector(".smchip-edit");
+input.value = "NEW";
+input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+await __wait(1300);
+return {
+  text: __widget(n, "text").value,
+  chips: __labels(),
+  mask: __mask(n),
+  newChipOn: document.querySelector('.smchip[data-i="1"]')?.className,
+  undoShown: document.querySelector(".pfl-undo")?.style.display,
+  clip: await __place(n, 0),
+};
+`,
+);
+const shotInserted = await shot("08-inserted.png", inserted.clip);
+
+const rowTail = await run(
+  "14-行尾空白 = 插到该行最后（文本中间）；最后一行之后 = 追加末尾",
+  `
+const n = window.__ins;
+const list = n.__pt.list;
+const chips = [...list.querySelectorAll(".smchip")];
+const lb = list.getBoundingClientRect();
+// 找第一行最后一个词片
+const rowTop = Math.round(chips[0].getBoundingClientRect().top);
+const rowIdx = chips.map((el, i) => i).filter(i => Math.round(chips[i].getBoundingClientRect().top) === rowTop);
+const lastOfRow = rowIdx[rowIdx.length - 1];
+const rl = chips[lastOfRow].getBoundingClientRect();
+const tailX = Math.round(Math.min(lb.right - 6, rl.right + 18));
+const tailY = Math.round(rl.top + rl.height / 2);
+list.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: tailX, clientY: tailY, button: 0 }));
+await __wait(200);
+const box = list.querySelector(".smchip.editing");
+const atTail = box?.dataset.insert ?? null;
+const input = box?.querySelector(".smchip-edit");
+if (input) { input.value = "TAIL"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
+await __wait(1300);
+const afterTail = __widget(n, "text").value;
+
+// 最后一行下方的空白 = 追加
+const chips2 = [...list.querySelectorAll(".smchip")];
+const last = chips2[chips2.length - 1].getBoundingClientRect();
+list.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: Math.round(lb.left + 20), clientY: Math.round(Math.min(lb.bottom - 4, last.bottom + 28)), button: 0 }));
+await __wait(200);
+const box2 = list.querySelector(".smchip.editing");
+const atEnd = box2?.dataset.insert ?? null;
+const input2 = box2?.querySelector(".smchip-edit");
+if (input2) { input2.value = "END"; input2.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
+await __wait(1300);
+return {
+  lastOfRow, atTail, afterTail,
+  chipsForEnd: chips2.length, atEnd,
+  finalText: __widget(n, "text").value,
+  endsWithEnd: __widget(n, "text").value.trim().endsWith(", END"),
+  mask: __mask(n),
+};
+`,
+);
+
+const cancelAndEmpty = await run(
+  "15-Esc 不插入 / 空串不插入 / 空文本双击空白 = 新建第一段",
+  `
+const n = window.__ins;
+const list = n.__pt.list;
+const lb = list.getBoundingClientRect();
+const before = __widget(n, "text").value;
+// Esc
+list.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: Math.round(lb.left + 30), clientY: Math.round(lb.bottom - 6), button: 0 }));
+await __wait(150);
+let input = list.querySelector(".smchip-edit");
+if (input) { input.value = "NOPE"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); }
+await __wait(700);
+const afterEsc = __widget(n, "text").value;
+// 空串提交
+list.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: Math.round(lb.left + 30), clientY: Math.round(lb.bottom - 6), button: 0 }));
+await __wait(150);
+input = list.querySelector(".smchip-edit");
+if (input) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+await __wait(900);
+const afterEmpty = __widget(n, "text").value;
+
+// 清空文本 -> 只剩提示文字，再双击那片空白
+__setText(n, "");
+await __wait(1400);
+const hintThere = !!list.querySelector(".sm-hint");
+const lb2 = list.getBoundingClientRect();
+list.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX: Math.round(lb2.left + 30), clientY: Math.round(lb2.top + 12), button: 0 }));
+await __wait(200);
+const box = list.querySelector(".smchip.editing");
+const at = box?.dataset.insert ?? null;
+const input2 = box?.querySelector(".smchip-edit");
+if (input2) { input2.value = "first"; input2.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
+await __wait(1300);
+return {
+  before, afterEsc, escKept: afterEsc === before,
+  afterEmpty, emptyKept: afterEmpty === before,
+  hintThere, insertAtOnEmpty: at,
+  textFromEmpty: __widget(n, "text").value,
+  maskFromEmpty: __mask(n),
+  chips: __labels(),
+};
+`,
+);
+const clipFromEmpty = await run("16-截图用：空文本插入后的样子", `
+const n = window.__ins;
+return { clip: await __place(n, 0) };
+`);
+const shotFromEmpty = await shot("09-insert-empty.png", clipFromEmpty.clip);
+
 // ---------------------------------------------------------------- 汇总
 const out = path.join(OUT, "verify-edit.json");
 fs.writeFileSync(out, JSON.stringify(results, null, 2));
 console.log("\n=== 实测结果 ===");
 console.log(JSON.stringify(results, null, 2));
-console.log(`\n截图：${shotEdit}\n      ${shotDone}\n      ${shotGate}`);
+console.log(`\n截图：${shotEdit}\n      ${shotDone}\n      ${shotGate}\n      ${shotHover}\n      ${shotBox}\n      ${shotInserted}\n      ${shotFromEmpty}`);
 ws.close();
 edge.kill();

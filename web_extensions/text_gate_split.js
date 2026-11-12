@@ -150,7 +150,7 @@ function ensureStyle() {
 .tgs-count[data-off="1"] { color: #ff9b9b; }
 .tgs-list {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; padding: 2px;
+  display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; padding: 2px;
 }
 /* 词条本体（.smchip 系列）由 chip_panel.js 统一提供，两个炸词节点共用一份 */
 .tgs-btn.tgs-water { color: #d8b4fe; background: rgba(139, 92, 246, 0.16); border-color: rgba(167, 139, 250, 0.6); }

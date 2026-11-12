@@ -20,7 +20,14 @@ const WEIGHT_STEP = 0.05; // 与后端 nodes/toggle.py 的 WEIGHT_STEP 对齐
 const STYLE_ID = "sm-chip-style";
 
 const CSS = `
-.sm-list { position: relative; }
+.sm-list { position: relative; cursor: text; }
+/* 空白处双击插入的悬停竖线：绝对定位、不吃指针事件，只在缝上亮起来 */
+.sm-gap-bar {
+  position: absolute; width: 2px; border-radius: 1px; opacity: 0;
+  background: rgba(140, 180, 255, 0.8); pointer-events: none;
+  transition: opacity .12s ease; z-index: 1;
+}
+.sm-gap-bar.on { opacity: 1; }
 .smchip {
   display: inline-flex; align-items: stretch;
   font-size: 12px; line-height: 17px; padding: 1px 6px 1px 3px; border-radius: 11px;
@@ -138,13 +145,45 @@ export class ChipList {
     this.node = node;
     this.opts = opts;
     this.drag = null;
-    this.editing = null;   // {i, box, input, seg} 正在编辑的那一段
+    this.editing = null;   // {mode:"edit"|"insert", i|k, box, input, seg} 正在编辑/插入的那一段
     this.clickTimer = null; // 待生效的单击开关（双击判定窗口内先压着）
     this.lastClick = null;  // {i, t, seg} 上一次单击
     this.undoState = null;
     this.undoTimer = null;
+    this.gapBar = null;     // 空白处双击插入的悬停竖线
+    this.gapAt = -1;
     ensureChipStyles();
-    if (opts.list) opts.list.classList.add("sm-list");
+    if (opts.list) {
+      opts.list.classList.add("sm-list");
+      this.bindListGestures(opts.list);
+    }
+  }
+
+  // 词片区容器自己的手势：悬停提示 + 双击空白插入。
+  // 容器从不重建（只换子节点），所以这里的 dblclick 是浏览器原生判定，不用压 220ms。
+  bindListGestures(list) {
+    list.addEventListener("pointermove", (e) => this.onHover(e));
+    list.addEventListener("pointerleave", () => this.hideGapBar());
+    list.addEventListener("dblclick", (e) => {
+      if (this.drag || this.editing) return;
+      if (e.target?.closest?.(".smchip")) return; // 双击词片 = 改词，别抢
+      e.preventDefault();
+      e.stopPropagation();
+      const rects = this.chipRects();
+      if (!rects.length) {
+        this.beginInsert(0); // 空文本：新建第一段
+        return;
+      }
+      this.beginInsert(slotFromRects(rects, -1, e.clientX, e.clientY));
+    });
+  }
+
+  chipEls() {
+    return Array.from(this.opts.list?.querySelectorAll(".smchip") || []);
+  }
+
+  chipRects() {
+    return this.chipEls().map((el) => el.getBoundingClientRect());
   }
 
   get st() {
@@ -174,10 +213,12 @@ export class ChipList {
       hint.className = "sm-hint";
       hint.textContent = this.opts.hint || "框里有字后，这里会按标点炸成可点的片段";
       list.replaceChildren(hint);
+      this.restoreGapBar();
       return;
     }
 
     list.replaceChildren(...segs.map((seg, i) => this.chipEl(seg, i, weights[i])));
+    this.restoreGapBar(); // replaceChildren 会把悬停竖线一起清掉，这里挂回来
   }
 
   updateCount() {
@@ -316,6 +357,7 @@ export class ChipList {
     e.preventDefault();
     e.stopPropagation();
     const chip = e.currentTarget;
+    this.hideGapBar(); // 开始按下词片：插入竖线让位
     const list = this.opts.list;
     // 冻结此刻每个词片在屏幕上的矩形：预览重排会让布局变化，落点必须拿冻结坐标算
     const chips = Array.from(list.querySelectorAll(".smchip"));
@@ -428,19 +470,15 @@ export class ChipList {
     if ((this.st.segs || [])[l.i] === l.seg) this.toggle(l.i);
   }
 
-  // ---------------------------------------------------------------- 双击就地编辑
+  // ---------------------------------------------------------------- 双击就地编辑 / 双击空白插入
 
-  beginEdit(i) {
-    const list = this.opts.list;
-    const seg = (this.st.segs || [])[i];
-    if (this.editing || seg == null || !list) return;
-    const chip = list.querySelector(`.smchip[data-i="${i}"]`);
-    if (!chip) return;
-
+  // 造一个就地输入框（改词和新插入共用同一份行为：Enter 提交 / Esc 取消 / 失焦提交 / 中文输入法保护）
+  makeInput(initial, placeholder) {
     const input = document.createElement("input");
     input.type = "text";
     input.className = "smchip-edit";
-    input.value = seg;              // 原文整段交给你改（(cat:1.2) 连括号一起）
+    input.value = initial;
+    if (placeholder) input.placeholder = placeholder;
     input.spellcheck = false;
     input.autocomplete = "off";
 
@@ -450,8 +488,8 @@ export class ChipList {
       const ctx = (this._measure ||= document.createElement("canvas").getContext("2d"));
       if (!ctx) return;
       ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-      const w = ctx.measureText(input.value || " ").width;
-      input.style.width = `${Math.min(240, Math.max(48, Math.ceil(w) + 18))}px`;
+      const w = ctx.measureText(input.value || placeholder || "新词").width;
+      input.style.width = `${Math.min(240, Math.max(64, Math.ceil(w) + 18))}px`;
     };
 
     // chip 的手势处理器会 preventDefault，光标和选区会被一起吃掉 -> 这里拦住
@@ -473,16 +511,13 @@ export class ChipList {
     input.addEventListener("blur", () => {
       if (this.editing) this.finishEdit(true); // 点到别处也算提交
     });
+    return { input, fitWidth };
+  }
 
-    // <button> 里不能塞 <input>（交互元素套交互元素，浏览器会闹脾气），
-    // 所以编辑期间把一个同色的 <div> 换上去，退出编辑后整体重画。
-    const box = document.createElement("div");
-    box.className = `${chip.className.replace(/\bediting\b/g, "").trim()} editing`;
-    box.dataset.i = String(i);
-    box.append(input);
-    chip.replaceWith(box);
-
-    this.editing = { i, box, input, seg };
+  // 编辑框挂进词片区，成为这一轮编辑的当前框
+  mountEditor(ed, box, fitWidth, selectAll) {
+    this.editing = ed;
+    this.hideGapBar(); // 竖线让位给输入框
 
     // 编辑期间点面板任何其它地方 = 提交（blur 在 preventDefault 的手势里不一定来）
     this._outside = (e) => {
@@ -496,9 +531,52 @@ export class ChipList {
     };
     document.addEventListener("pointerdown", this._outside, true);
 
-    input.focus();
-    input.select();
+    ed.input.focus();
+    if (selectAll) ed.input.select();
     fitWidth();
+    // 词片区可滚动：框可能落在可视区外，滚一把否则看着像没反应
+    requestAnimationFrame(() => box.scrollIntoView?.({ block: "nearest" }));
+  }
+
+  beginEdit(i) {
+    const list = this.opts.list;
+    const seg = (this.st.segs || [])[i];
+    if (this.editing || seg == null || !list) return;
+    const chip = list.querySelector(`.smchip[data-i="${i}"]`);
+    if (!chip) return;
+
+    const { input, fitWidth } = this.makeInput(seg, "");
+    // <button> 里不能塞 <input>（交互元素套交互元素，浏览器会闹脾气），
+    // 所以编辑期间把一个同色的 <div> 换上去，退出编辑后整体重画。
+    const box = document.createElement("div");
+    box.className = `${chip.className.replace(/\bediting\b/g, "").trim()} editing`;
+    box.dataset.i = String(i);
+    box.append(input);
+    chip.replaceWith(box);
+    this.mountEditor({ mode: "edit", i, box, input, seg }, box, fitWidth, true);
+  }
+
+  // 双击词片之间的空白：在这个位置开一个空框，写进去的词插进文本同一位置。
+  // k = 插到第几段之前（k 等于段数就是追加到末尾）。
+  beginInsert(k) {
+    const list = this.opts.list;
+    if (this.editing || !list) return;
+    const segs = this.st.segs || [];
+    const at = Math.max(0, Math.min(segs.length, k | 0));
+
+    const { input, fitWidth } = this.makeInput("", "输入新词…");
+    const box = document.createElement("div");
+    box.className = "smchip on editing"; // 新词默认开启：先长成绿的，写进去就是绿的
+    box.dataset.insert = String(at);
+    box.append(input);
+
+    list.querySelector(".sm-hint")?.remove(); // 空文本时那块提示让位给输入框
+    const chips = this.chipEls();
+    const next = chips[at] || null;
+    if (next) list.insertBefore(box, next);
+    else list.appendChild(box);
+
+    this.mountEditor({ mode: "insert", k: at, box, input, seg: "" }, box, fitWidth, false);
   }
 
   detachOutside() {
@@ -516,13 +594,13 @@ export class ChipList {
     ed.box.classList.remove("editing");
     ed.box.remove();       // 原地留个空位，随后的 render 会把整排词重画
 
-    if (!commit) {
+    const clean = val.trim();
+    if (!commit || clean === ed.seg) {
       this.render();
       return;
     }
-    const clean = val.trim();
-    if (clean === ed.seg) {
-      this.render();
+    if (ed.mode === "insert") {
+      this.insert(ed.k, clean); // 插入框里空着提交 = 什么都不插（上面的 clean === seg 已经挡了）
       return;
     }
     if (!clean) {
@@ -554,6 +632,89 @@ export class ChipList {
       else mask.push(v);
     }
     this.applyNew(data, mask);
+  }
+
+  // 插一段：新词落在第 k 段之前，只多一个分隔符；mask 在同一位插一个 1（默认开）
+  async insert(k, body) {
+    const data = await this.mutate(`insert=${k},${encodeURIComponent(body)}`);
+    if (!data) {
+      this.render();
+      return;
+    }
+    this.pushUndo();
+    const oldMask = this.st.mask || [];
+    const n = (this.st.segs || []).length;
+    // 新词里带逗号会炸成好几段：按实际增加的段数补 1
+    const add = Math.max(1, (data.segments || []).length - n);
+    const at = Math.max(0, Math.min(n, k));
+    const mask = [
+      ...oldMask.slice(0, at),
+      ...Array(add).fill(1),
+      ...oldMask.slice(at),
+    ];
+    this.applyNew(data, mask);
+  }
+
+  // ---------------------------------------------------------------- 空白处插入：悬停竖线
+
+  ensureGapBar() {
+    const list = this.opts.list;
+    if (!list) return null;
+    if (!this.gapBar || !this.gapBar.isConnected) {
+      const bar = document.createElement("div");
+      bar.className = "sm-gap-bar";
+      list.appendChild(bar);
+      this.gapBar = bar;
+    }
+    return this.gapBar;
+  }
+
+  restoreGapBar() {
+    this.ensureGapBar();
+    this.gapAt = -1;
+    if (this.gapBar) this.gapBar.classList.remove("on");
+  }
+
+  hideGapBar() {
+    this.gapAt = -1;
+    if (this.gapBar) this.gapBar.classList.remove("on");
+  }
+
+  onHover(e) {
+    if (this.drag || this.editing) return this.hideGapBar();
+    if (e.target?.closest?.(".smchip")) return this.hideGapBar(); // 在词片上不提示
+    const els = this.chipEls();
+    if (!els.length) return this.hideGapBar(); // 空文本：没有缝可提示
+    const rects = els.map((el) => el.getBoundingClientRect());
+    this.showGapBar(els, slotFromRects(rects, -1, e.clientX, e.clientY));
+  }
+
+  // 竖线画在「前一个词片之后」的那条缝上（插入点落在行边界时也这样，看着最顺）。
+  // 位置用 offsetLeft/offsetTop 算：它们相对 .sm-list，滚动 container 里也不会错。
+  showGapBar(els, k) {
+    const list = this.opts.list;
+    const bar = this.ensureGapBar();
+    if (!bar || !list) return;
+    const prev = k > 0 ? els[k - 1] : null;
+    const next = els[k] || null;
+    if (!prev && !next) return this.hideGapBar();
+    const gap = parseFloat(getComputedStyle(list).columnGap) || 8;
+    const half = gap / 2;
+    let left, top, height;
+    if (prev) {
+      left = prev.offsetLeft + prev.offsetWidth + half - 1;
+      top = prev.offsetTop;
+      height = prev.offsetHeight;
+    } else {
+      left = Math.max(0, next.offsetLeft - half - 1);
+      top = next.offsetTop;
+      height = next.offsetHeight;
+    }
+    bar.style.left = `${Math.round(left)}px`;
+    bar.style.top = `${Math.round(top)}px`;
+    bar.style.height = `${Math.round(height)}px`;
+    bar.classList.add("on");
+    this.gapAt = k;
   }
 
   // ---------------------------------------------------------------- 操作

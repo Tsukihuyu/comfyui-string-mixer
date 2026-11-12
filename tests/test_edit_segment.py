@@ -28,6 +28,7 @@ spec.loader.exec_module(mod)
 split_spans = mod.split_spans
 split = mod.split_prompt_segments
 edit_segment = mod.edit_segment
+insert_segment = mod.insert_segment
 apply_toggle = mod.apply_toggle
 
 failures = []
@@ -91,6 +92,27 @@ out = edit_segment("cat, dog, bird", 1, "wolf")
 check("三段的文本", out, "cat, wolf, bird")
 check("关中间一段", apply_toggle(out, "[1,0,1]"), "cat, bird")
 check("全开 = 原文", apply_toggle(out, "[1,1,1]"), "cat, wolf, bird")
+
+print("insert_segment —— 只加新词和一个分隔符")
+
+check("插在中间", insert_segment("a, b, c", 1, "x"), "a, x, b, c")
+check("插在最前", insert_segment("a, b, c", 0, "x"), "x, a, b, c")
+check("插到末尾", insert_segment("a, b, c", 3, "x"), "a, b, c, x")
+check("越界按末尾算", insert_segment("a, b", 99, "x"), "a, b, x")
+check("负下标按最前算", insert_segment("a, b", -5, "x"), "x, a, b")
+check("空文本 = 新建第一段", insert_segment("", 0, "x"), "x")
+check("空词什么都不做", insert_segment("a, b", 1, "   "), "a, b")
+check("首尾空白被吃", insert_segment("a, b", 1, "  x  "), "a, x, b")
+
+check("冒号标签后面只隔空格", insert_segment("Style: anime", 1, "x"), "Style: x, anime")
+check("新词本身是标签", insert_segment("a, b", 1, "Style:"), "a, Style: b")
+check("原文以逗号结尾别叠逗号", insert_segment("a,", 1, "x"), "a, x")
+
+check("原文标点一个不动", insert_segment("a. b; c", 2, "x"), "a. b; x, c")
+check("插进受保护块之前", insert_segment("《红, 蓝》, 微笑", 1, "x"), "《红, 蓝》, x, 微笑")
+
+grown_ins = insert_segment("a, b", 1, "x, y")
+check("新词带逗号 -> 多出两段", bodies(grown_ins), ["a", "x", "y", "b"])
 
 print()
 if failures:

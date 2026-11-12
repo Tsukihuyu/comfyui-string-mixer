@@ -345,6 +345,43 @@ def edit_segment(text, index, new_body, pairs=None):
     return text[:start] + clean + text[end:]
 
 
+def insert_segment(text, index, body, pairs=None):
+    """在第 index 段之前插入新的一段，其余字符一个都不动。
+
+    只额外产生「新词 + 一个分隔符」，原文的标点、空格、别的段原样活着：
+      k == 0        -> 新词放在最前
+      0 < k < n     -> 原文该位置已有的分隔符留着，新词塞在它和下一段之间
+      k >= n        -> 追加到末尾（前一段是冒号标签就只隔一个空格）
+    空文本 -> 新词就是全文（等于新建第一段）。空 body 什么都不做。
+    前端「双击词片之间的空白」走这里（/prompt_toggle/split?insert=k,新词）。
+    """
+    clean = (body or "").strip()
+    if not clean:
+        return text
+    segs = list(pairs) if pairs is not None else split_spans(text)
+    if not segs:  # 空文本：新词就是全部
+        return clean
+    try:
+        k = max(0, min(len(segs), int(index)))
+    except (TypeError, ValueError):
+        k = len(segs)
+    # 新词后面跟什么：冒号标签后面只能隔空格，其它按逗号
+    after = " " if is_colon_tail(clean) else ", "
+
+    if k == 0:
+        return clean + after + text
+
+    if k >= len(segs):  # 追加：别在原本就以分隔符结尾的文本后面再叠一个
+        head = text.rstrip()
+        if head and head[-1] in SPLIT_CHARS:
+            return head + " " + clean
+        sep = " " if is_colon_tail(segs[-1][0]) else ", "
+        return text + sep + clean
+
+    start = segs[k][2]
+    return text[:start] + clean + after + text[start:]
+
+
 def merge_upstream(main, upstream):
     """上游在前、本节点结果在后。上游原样保留（不参与开关），空则忽略。"""
     extra = (upstream or "").strip()
@@ -407,6 +444,7 @@ if PromptServer is not None:
           move=<from>,<to>    把第 from 段挪到第 to 位（按住拖动排序）
           weight=<i>,<delta>  给第 i 段加减权重（词片左边的 ＋/－）
           edit=<i>,<新词>     把第 i 段整段换成新词（双击词片就地编辑；只改这一段）
+          insert=<k>,<新词>   在第 k 段之前插入一段（双击词片之间的空白；只插新词和一个分隔符）
         让服务端算，前端就不用自己拼标点，也就不会和 original 模式两套实现。
         """
         text = request.query.get("text", "")
@@ -449,6 +487,14 @@ if PromptServer is not None:
             try:
                 idx, body = raw_edit.split(",", 1)
                 new_text = edit_segment(text, int(idx), body)
+            except (TypeError, ValueError):
+                pass
+
+        raw_insert = request.query.get("insert")
+        if new_text is None and raw_insert:
+            try:
+                idx, body = raw_insert.split(",", 1)
+                new_text = insert_segment(text, int(idx), body)
             except (TypeError, ValueError):
                 pass
 
