@@ -64,6 +64,7 @@ const CSS = `
   display: flex; align-items: center; justify-content: center; height: 10px;
 }
 .smchip .wbtn:hover { opacity: 1; background: rgba(255,255,255,.18); }
+.smchip .wbtn svg { display: block; width: 8px; height: 8px; }
 
 .smchip .wbadge {
   align-self: center; font-size: 10px; font-weight: 700; margin-left: 5px; padding: 0 4px;
@@ -134,6 +135,12 @@ function fmtWeight(w) {
 // 逐词锁的两个形态（选定方案 D）：同一个闭合挂锁图案，只差颜色与填充。
 //   已锁 = 青蓝 #7dd3fc 实心 + 锁孔；未锁 = 灰绿 #9fb8a6 描边 + 18% 淡填充。
 // 用固定色而不是 currentColor：锁表达"权限"，不该跟着词片的绿/红一起变。
+// 权重 ＋/－ 用矢量画，不用全角字形：Inter 里 "＋" 的墨迹在基线上方 7px、
+// "－" 在 3~4px（实测 measureText 的 ascent/descent = 7/0 与 4/-3），
+// 两个盒子明明居中，墨迹却各偏各的 —— 看上去就是加减号往上飘、上下不齐。
+const WPLUS_SVG = `<svg viewBox="0 0 8 8" aria-hidden="true"><path d="M1.3 4H6.7M4 1.3V6.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+const WMINUS_SVG = `<svg viewBox="0 0 8 8" aria-hidden="true"><path d="M1.3 4H6.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+
 const LOCK_SVG_ON = `<svg viewBox="0 0 11 12" fill="none" stroke-linecap="round" aria-hidden="true">
   <rect x="1.2" y="5" width="8.6" height="6.1" rx="1.6" fill="#7dd3fc" fill-opacity=".85" stroke="#7dd3fc" stroke-width="1.7"/>
   <path d="M3.15 5V3.5a2.35 2.35 0 0 1 4.7 0V5" stroke="#7dd3fc" stroke-width="1.7"/>
@@ -446,7 +453,7 @@ export class ChipList {
   wbtnEl(glyph, i, delta, weight, tip) {
     const el = document.createElement("span");
     el.className = "wbtn";
-    el.textContent = glyph;
+    el.innerHTML = glyph === "＋" ? WPLUS_SVG : WMINUS_SVG;
     el.title = weight === 1
       ? `${tip}（当前 1.00，加减后才写进括号）`
       : `${tip}（当前 ${fmtWeight(weight)}）`;
