@@ -99,15 +99,14 @@ const CSS = `
 }
 .smchip.editing { cursor: text; }
 
-/* 逐词锁：词片最左的小锁。纯图标（内联 SVG + currentColor），不引入第三种底色。
-   未锁 = 开锁轮廓 + 低透明度（不抢眼但位置固定）；已锁 = 闭合锁 + 实心。
-   拒绝删除时闪一下（.deny），不弹窗。 */
+/* 逐词锁：词片最左的小锁。同一个闭合挂锁图案，只差颜色：
+   已锁 = 青蓝实心 + 锁孔；未锁 = 灰绿淡填充。拒绝删除时闪一下（.deny），不弹窗。 */
 .smchip .smlock {
   align-self: center; display: flex; align-items: center;
   width: 12px; height: 13px; padding: 0 3px 0 1px; margin-right: 4px;
-  opacity: .34; cursor: pointer; flex: 0 0 auto; transition: opacity .12s ease;
+  opacity: .85; cursor: pointer; flex: 0 0 auto; transition: opacity .12s ease;
 }
-.smchip .smlock:hover { opacity: .8; }
+.smchip .smlock:hover { opacity: 1; }
 .smchip .smlock.on { opacity: 1; }
 .smchip .smlock svg { display: block; width: 11px; height: 12px; }
 .smchip .smlock.deny { animation: smlock-deny .32s ease; }
@@ -132,19 +131,18 @@ function fmtWeight(w) {
   return String(Number(n.toFixed(2)));
 }
 
-// 逐词锁的两个形态：都是纯线条 + currentColor（跟着词片的绿/红走），不引入新颜色。
-// 差别靠三处叠加，保证 11px 大小下也分得清：挂环闭合与否（轮廓不同）、箱体实心与否、透明度。
-const LOCK_SVG_ON = `<svg viewBox="0 0 11 12" aria-hidden="true">
-  <rect x="1.1" y="5.1" width="8.8" height="6" rx="1.5" fill="currentColor" fill-opacity=".38"
-        stroke="currentColor" stroke-width="1.9"/>
-  <path d="M3.1 5.1V3.4a2.4 2.4 0 0 1 4.8 0v1.7" fill="none" stroke="currentColor"
-        stroke-width="1.9" stroke-linecap="round"/>
+// 逐词锁的两个形态（选定方案 D）：同一个闭合挂锁图案，只差颜色与填充。
+//   已锁 = 青蓝 #7dd3fc 实心 + 锁孔；未锁 = 灰绿 #9fb8a6 描边 + 18% 淡填充。
+// 用固定色而不是 currentColor：锁表达"权限"，不该跟着词片的绿/红一起变。
+const LOCK_SVG_ON = `<svg viewBox="0 0 11 12" fill="none" stroke-linecap="round" aria-hidden="true">
+  <rect x="1.2" y="5" width="8.6" height="6.1" rx="1.6" fill="#7dd3fc" fill-opacity=".85" stroke="#7dd3fc" stroke-width="1.7"/>
+  <path d="M3.15 5V3.5a2.35 2.35 0 0 1 4.7 0V5" stroke="#7dd3fc" stroke-width="1.7"/>
+  <circle cx="5.5" cy="8.1" r="0.95" fill="#0b2733" stroke="#7dd3fc" stroke-width="1.7"/>
 </svg>`;
-const LOCK_SVG_OFF = `<svg viewBox="0 0 11 12" aria-hidden="true">
-  <rect x="1.1" y="5.1" width="8.8" height="6" rx="1.5" fill="none"
-        stroke="currentColor" stroke-width="1.1"/>
-  <path d="M1.9 5.1V3.6a2.6 2.6 0 0 1 5.2 0" fill="none" stroke="currentColor"
-        stroke-width="1.1" stroke-linecap="round"/>
+const LOCK_SVG_OFF = `<svg viewBox="0 0 11 12" fill="none" stroke-linecap="round" aria-hidden="true">
+  <rect x="1.2" y="5" width="8.6" height="6.1" rx="1.6" fill="#9fb8a6" fill-opacity=".18" stroke="#9fb8a6" stroke-width="1.6"/>
+  <path d="M3.15 5V3.5a2.35 2.35 0 0 1 4.7 0V5" stroke="#9fb8a6" stroke-width="1.6"/>
+  <circle cx="5.5" cy="8.1" r="0.95" fill="none" stroke="#9fb8a6" stroke-width="1.6"/>
 </svg>`;
 
 // 指针落在哪个位置：在「拖动开始时冻结的矩形」里找，返回摘掉被拖那一个之后应插入的下标。

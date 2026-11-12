@@ -729,12 +729,13 @@ app.canvas.draw(true);
 await __wait(900);
 
 const lockAt = (i) => n.__pt.list.querySelector('.smchip[data-i="' + i + '"] .smlock');
-const before = { cls: lockAt(0)?.className, svg: lockAt(0)?.innerHTML.includes("fill-opacity") };
+// 已锁/未锁都是同一个图案，靠颜色区分：已锁青蓝 #7dd3fc，未锁灰绿 #9fb8a6
+const before = { cls: lockAt(0)?.className, blue: lockAt(0)?.innerHTML.includes("7dd3fc"), grey: lockAt(0)?.innerHTML.includes("9fb8a6") };
 lockAt(0).click();
 await __wait(250);
 return {
   before,
-  after: { cls: lockAt(0)?.className, svg: lockAt(0)?.innerHTML.includes("fill-opacity") },
+  after: { cls: lockAt(0)?.className, blue: lockAt(0)?.innerHTML.includes("7dd3fc"), grey: lockAt(0)?.innerHTML.includes("9fb8a6") },
   pinsProp: n.properties.prompt_toggle_pins,
   keys: n.__pt.keys,
   chips: __labels(),
