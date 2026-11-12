@@ -43,7 +43,7 @@ const MIN_NODE_H = 416;  // 能缩到的最小高度（编辑框 2 行 + 片段 
 //   * 控件区之外还有标题 26 + 底部留白 8
 // 版面分配必须跟这套账严格对上：只要多占 1px，_arrangeWidgets 就会每帧把节点加高一次。
 const WIDGET_OVERHEAD = 20;  // 单个 DOM 控件除可见高度外的固定占用
-const NODE_CHROME = 34;      // 标题 26 + 底部留白 8
+const NODE_CHROME = 34;      // 兜底值：标题 26 + 底部留白 8（真实值见 nodeChrome()）
 const RETRY_MS = 200;    // 队列忙时重试间隔
 const RETRY_MAX = 10;
 const ARM_MS = 5000;     // "再点一次"的确认态
@@ -1208,7 +1208,10 @@ function measureLineH(m) {
 function textLines(node) {
   const w = textWidget(node);
   const m = textMetrics(node);
-  if (!w || !m) return TEXT_MAX_LINES;
+  // 量不到真身（元素还没挂进 DOM）就返回 null，让 layout 等下一次再来。
+  // 以前这里兜底返回 TEXT_MAX_LINES，第一次排就会按 10 行占位，等真值回来再缩 —
+  // 那一放一缩会让节点被撑高一次，然后 chips = H - fixed - text 每轮多算 12px，节点就自己长高。
+  if (!w || !m) return null;
   const value = String(w.value ?? "");
   const cache = node.__tgs?.lineCache;
   if (cache && cache.value === value && cache.width === m.width) return cache.lines;
@@ -1242,6 +1245,35 @@ function widgetSlotH(w, width) {
   return w.computedHeight ?? 24;
 }
 
+// 节点除控件以外的固定开销（标题 + 底部留白）。
+// 这个数会随前端版本变（本前端实测 46 = 标题 30 + 16），写死常数就会算错账：
+// 每轮 layout 少留 12px，_arrangeWidgets 就把节点加高 12px —— 于是节点自己一直长高。
+// 框架每排完一次布局都满足「节点高 = 各控件 computedHeight 之和 + 这个开销」，
+// 所以直接反算最准；控件还没量到时才回落到常数。
+function nodeChrome(node) {
+  const st = node.__tgs;
+  if (st && Number.isFinite(st.chrome) && st.chrome > 0) return st.chrome;
+  // 兜底：标题高 + 底部留白（本前端实测 30 + 16 = 46）；probeChrome 学到真值后会覆盖它
+  return ((window.LiteGraph && LiteGraph.NODE_TITLE_HEIGHT) || 26) + 16;
+}
+
+// 排完一轮后回头看一眼真实开销：节点高 − 各控件 computedHeight 之和。
+// 前端改版时会变（这份前端实测 46 = 标题 30 + 16），写死就会每轮差 12px、节点一直长高。
+// 量到合理值就记住并重排一次；不合理（控件还没量全）就保持原值，不做任何事。
+function probeChrome(node) {
+  const st = node.__tgs;
+  if (!st) return;
+  const H = node.size?.[1] || 0;
+  const sum = node.widgets.reduce((a, w) => a + (w?.computedHeight || 0), 0);
+  const real = H - sum;
+  if (sum > 0 && real >= 20 && real <= 80 && st.chrome !== real) {
+    st.chrome = real;
+    st.chipsH = -1;
+    st.textH = -1;
+    layout(node);
+  }
+}
+
 function otherWidgetHeight(node, width) {
   const st = node.__tgs;
   let h = 0;
@@ -1263,13 +1295,17 @@ function layout(node) {
   const lineH = m?.lineH || TEXT_LINE_H;
   const padV = m?.padV ?? TEXT_PAD_V;
   const lines = textLines(node);
+  if (lines == null) {
+    queueLayout(node); // 元素还没就绪：120ms 后再量，别按兜底行数硬排
+    return;
+  }
 
   const minText = TEXT_MIN_LINES * lineH + padV;
   const maxText = TEXT_MAX_LINES * lineH + padV;
   const want = Math.min(maxText, Math.max(minText, lines * lineH + padV));
 
   // 版面必须严丝合缝：多占 1px，_arrangeWidgets 下一帧就会把节点加高（于是每帧都长一点）
-  const fixed = NODE_CHROME + otherWidgetHeight(node, node.size?.[0] ?? 400) + WIDGET_OVERHEAD * 2;
+  const fixed = nodeChrome(node) + otherWidgetHeight(node, node.size?.[0] ?? 400) + WIDGET_OVERHEAD * 2;
   // 片段区先保住最小高度，编辑框再退让；其余空间全归片段区，不设上限
   const text = Math.max(minText, Math.min(want, H - fixed - CHIPS_H));
   const chips = Math.max(CHIPS_H, H - fixed - text);
@@ -1289,6 +1325,7 @@ function layout(node) {
   setTimeout(() => {
     const s2 = node.__tgs;
     if (s2) s2.laying = false;
+    probeChrome(node);
   }, 60);
 }
 
