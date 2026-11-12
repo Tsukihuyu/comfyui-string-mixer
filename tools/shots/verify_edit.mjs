@@ -660,7 +660,8 @@ return {
   boxW: Math.round(rb.width), boxH: Math.round(rb.height),
   taW: Math.round(r1.width), taH: Math.round(r1.height),
   sameWidth: Math.abs(rb.width - cr.width) <= 3,
-  asTallAsChip: Math.abs(rb.height - cr.height) <= 4,
+  // 进编辑后 ＋/－/×/锁 都让位了，文字可用宽度变大，可能少折一行 —— 差一行以内就算对
+  asTallAsChip: Math.abs(rb.height - cr.height) <= 20,
   innerScroll: ta.scrollHeight > ta.clientHeight + 2,
   overflowX: ta.scrollWidth > ta.clientWidth + 1,
   listW: list.clientWidth, listH: list.clientHeight,
@@ -708,11 +709,145 @@ return {
 `,
 );
 
+// ---------------------------------------------------------------- 19-22. 逐词锁
+const lockSetup = await run(
+  "19-逐词锁：上锁 → 图标变实心、键写进 properties",
+  `
+app.graph.clear();
+const n = LiteGraph.createNode("PromptToggle");
+app.graph.add(n);
+n.pos = [0, 0];
+n.size[0] = 320;
+n.size[1] = 400;
+await __wait(1600);
+__setText(n, "blue hair, cat, dog");
+await __wait(1500);
+window.__lock = n;
+app.canvas.ds.scale = 1;
+app.canvas.ds.offset = [-n.pos[0] + 120, -n.pos[1] + 160];
+app.canvas.draw(true);
+await __wait(900);
+
+const lockAt = (i) => n.__pt.list.querySelector('.smchip[data-i="' + i + '"] .smlock');
+const before = { cls: lockAt(0)?.className, svg: lockAt(0)?.innerHTML.includes("fill-opacity") };
+lockAt(0).click();
+await __wait(250);
+return {
+  before,
+  after: { cls: lockAt(0)?.className, svg: lockAt(0)?.innerHTML.includes("fill-opacity") },
+  pinsProp: n.properties.prompt_toggle_pins,
+  keys: n.__pt.keys,
+  chips: __labels(),
+  clip: await __place(n, 0),
+};
+`,
+);
+const shotLocked = await shot("11-lock-on.png", lockSetup.clip);
+
+const lockDeny = await run(
+  "20-× 删锁定词被拒（图标闪一下，文本不变）；解锁后删得掉",
+  `
+const n = window.__lock;
+const list = n.__pt.list;
+const text0 = __widget(n, "text").value;
+// × 在锁定词上
+list.querySelector('.smchip[data-i="0"] .smchip-del').click();
+await __wait(120);
+const denyClass = list.querySelector('.smchip[data-i="0"] .smlock')?.classList.contains("deny");
+await __wait(400);
+const afterDel = __widget(n, "text").value;
+// 双击 -> 清空 -> Enter 也应该被拒
+await __dbl(0);
+const ta = list.querySelector(".smchip-edit");
+ta.value = "   ";
+ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+await __wait(900);
+const afterEmpty = __widget(n, "text").value;
+const stillPinned = list.querySelector('.smchip[data-i="0"] .smlock')?.classList.contains("on");
+// 解锁后再删：应当成功
+list.querySelector('.smchip[data-i="0"] .smlock').click();
+await __wait(200);
+list.querySelector('.smchip[data-i="0"] .smchip-del').click();
+await __wait(1200);
+return {
+  text0,
+  denyClass,
+  delBlocked: afterDel === text0,
+  emptyEditBlocked: afterEmpty === text0,
+  stillPinned,
+  pinsAfterUnlock: n.properties.prompt_toggle_pins ?? null,
+  textAfterDelete: __widget(n, "text").value,
+  chips: __labels(),
+};
+`,
+);
+
+const gateLock = await run(
+  "21-闸门炸词：✕ 清空只留锁词、账本保留锁定键、闸门仍算开着",
+  `
+app.graph.clear();
+const g = LiteGraph.createNode("TextGateSplit");
+app.graph.add(g);
+g.pos = [0, 0];
+g.size[0] = 340;
+g.size[1] = 460;
+await __wait(1700);
+__setText(g, "blue hair, cat, dog");
+await __wait(1500);
+window.__glock = g;
+app.canvas.ds.scale = 1;
+app.canvas.ds.offset = [-g.pos[0] + 120, -g.pos[1] + 160];
+app.canvas.draw(true);
+await __wait(900);
+
+const list = g.__tgs.list;
+const lockBtns = [...list.querySelectorAll(".smlock")];
+lockBtns[0].click();          // 锁 blue hair
+await __wait(300);
+const pinsBefore = g.properties.tgs_pins;
+// ✕ 在状态条上（不是词条面板），需要点两次（第一次是"确认"档）
+const clearBtn = g.__tgs.clearBtn;
+clearBtn?.click();
+await __wait(150);
+clearBtn?.click();
+await __wait(1600);
+return {
+  pinsBefore,
+  textAfterClear: __widget(g, "text").value,
+  chips: __labels(),
+  seen: JSON.parse(g.properties.tgs_seen || "[]"),
+  gateOpen: g.__tgs.gate?.open,
+  gateReason: g.__tgs.gate?.reason,
+  lockedOnly: g.__tgs.chips?.lockedOnly?.(),
+  pinsAfterClear: g.properties.tgs_pins,
+  clip: await __place(g, 0),
+};
+`,
+);
+const shotGateLock = await shot("12-gate-locked-clear.png", gateLock.clip);
+
+const injection = await run(
+  "22-排队注入：graphToPrompt 里 pins 带上了锁定词",
+  `
+const g = window.__glock;
+const res = await app.graphToPrompt();
+const entry = (res.output || {})[String(g.id)];
+return {
+  pins: entry?.inputs?.pins,
+  parsed: JSON.parse(entry?.inputs?.pins || "[]"),
+  mask: entry?.inputs?.mask,
+  text: entry?.inputs?.text,
+};
+`,
+);
+
 // ---------------------------------------------------------------- 汇总
 const out = path.join(OUT, "verify-edit.json");
 fs.writeFileSync(out, JSON.stringify(results, null, 2));
 console.log("\n=== 实测结果 ===");
 console.log(JSON.stringify(results, null, 2));
-console.log(`\n截图：${shotEdit}\n      ${shotDone}\n      ${shotGate}\n      ${shotHover}\n      ${shotBox}\n      ${shotInserted}\n      ${shotFromEmpty}\n      ${shotLong}`);
+console.log(`\n截图：${shotEdit}\n      ${shotDone}\n      ${shotGate}\n      ${shotHover}\n      ${shotBox}\n      ${shotInserted}\n      ${shotFromEmpty}\n      ${shotLong}
+      ${shotLocked}
+      ${shotGateLock}`);
 ws.close();
 edge.kill();

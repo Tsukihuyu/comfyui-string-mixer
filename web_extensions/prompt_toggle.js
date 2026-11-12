@@ -41,6 +41,23 @@ function writeMask(node, arr) {
   app.graph?.change?.(); // 标脏，关窗口前会提示保存
 }
 
+// 逐词锁：存归一化词键（不是位置），所以文本重排/去重以后锁还认得住那个词
+function readPins(node) {
+  try {
+    const v = JSON.parse(node.properties?.prompt_toggle_pins || "[]");
+    return Array.isArray(v) ? v.map((x) => String(x)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePins(node, keys) {
+  node.properties = node.properties || {};
+  if (keys.length) node.properties.prompt_toggle_pins = JSON.stringify(keys);
+  else delete node.properties.prompt_toggle_pins;
+  app.graph?.change?.();
+}
+
 // 文本改过之后，按“文字 + 出现次序”把旧的开关状态接过去
 function reconcile(prevSegs, prevMask, segs) {
   const pool = new Map();
@@ -136,6 +153,7 @@ async function refreshSegments(node) {
         ? st.mask.slice()
         : reconcile(st.segs, st.mask, segs);
     st.segs = segs;
+    st.keys = data.keys || [];
     st.weights = data.weights || [];
     st.mask = mask.length === segs.length ? mask : segs.map(() => 1);
     writeMask(node, st.mask);
@@ -306,7 +324,7 @@ function setupNode(node) {
       b.type = "button";
       b.className = "pfl-undo";
       b.textContent = "撤销";
-      b.title = "把上一步操作（删除 / 拖动排序 / 权重）退回原来的文本（10 秒内有效）";
+      b.title = "把上一步操作（删除 / 拖动排序 / 权重 / 编辑）退回原来的文本（10 秒内有效；锁住的词不受影响）";
       b.addEventListener("pointerdown", (e) => e.stopPropagation());
       b.addEventListener("click", (e) => {
         e.preventDefault();
@@ -352,6 +370,8 @@ function setupNode(node) {
     getText: () => String(getWidget(node, "text")?.value ?? ""),
     writeText: (text) => writeText(node, text),
     writeMask: (arr) => writeMask(node, arr),
+    readPins: () => readPins(node),
+    writePins: (keys) => writePins(node, keys),
     // after 只做「让画布重画」这类轻活：词片颜色由 ChipList 就地换，
     // 这里若再调 render(node) 会把整排元素重建，绿↔红的过渡就没起点、不会动。
     after: () => node.setDirtyCanvas?.(true, true),

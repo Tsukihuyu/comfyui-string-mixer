@@ -228,6 +228,24 @@ function writeMask(node, arr) {
   app.graph?.change?.(); // 标脏，关窗口前会提示保存
 }
 
+// 逐词锁：存归一化词键（不是位置），所以文本重排/去重以后锁还认得住那个词。
+// 注意和大写的 tgs_lock 不是一回事：tgs_lock 是"冻结整框"，这里是"钉住某一个词"。
+function readPins(node) {
+  try {
+    const v = JSON.parse(node.properties?.tgs_pins || "[]");
+    return Array.isArray(v) ? v.map((x) => String(x)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePins(node, keys) {
+  node.properties = node.properties || {};
+  if (keys.length) node.properties.tgs_pins = JSON.stringify(keys);
+  else delete node.properties.tgs_pins;
+  app.graph?.change?.();
+}
+
 // ------------------------------------------------------------------ 闸门状态：你动没动过手
 //
 // 闸门关的理由只有一个——你动过手。三条判据全部不成立才算“没动过”：
@@ -285,6 +303,10 @@ function gateState(node) {
   const manualLock = propStr(node, "tgs_lock") === "1";
   // 框空 = 闸门本身就是开的，跟“动没动过”无关
   if (!text.trim()) return { open: true, reason: "", manualLock };
+  // 只剩锁定词 = 也当框空：✕ 清空之后框里会留着锁词，不能因此把闸门关死
+  if (!manualLock && node.__tgs?.chips?.lockedOnly?.()) {
+    return { open: true, reason: "", manualLock, pinsOnly: true };
+  }
 
   const base = propStr(node, "tgs_base");
   const reasons = [];
@@ -443,6 +465,7 @@ async function refreshSegments(node) {
         ? st.mask.slice()
         : reconcile(st.segs, st.mask, segs);
     st.segs = segs;
+    st.keys = data.keys || [];
     st.weights = data.weights || [];
     st.mask = mask.length === segs.length ? mask : segs.map(() => 1);
     writeMask(node, st.mask);
@@ -583,14 +606,14 @@ function render(node) {
     st.lockBtn.dataset.on = lockedNow ? "1" : "";
     st.lockBtn.disabled = !!st.busy || reservoir || !sourceText(node).trim();
     st.lockBtn.title = reservoir
-      ? "蓄水模式不看闸门，锁不上（点 💧 蓄水模式 切回拦截模式）"
+      ? "蓄水模式不看闸门，冻结不上（点 💧 蓄水模式 切回拦截模式）"
       : !sourceText(node).trim()
-      ? "框是空的，闸门本来就开着，不用锁"
+      ? "框是空的，闸门本来就开着，不用冻结"
       : lockedNow
-        ? "已锁定：下次执行不会换掉这里的内容。点击 = 解锁，并把当前内容认作新基线"
+        ? "冻结整框中：下次执行不会换掉这里的内容。点击 = 解冻，并把当前内容认作新基线（逐词锁在词片最左边，是另一回事）"
         : gate.open
-          ? "点一下锁住：下次执行不会自动换掉这里的内容"
-          : `已因「${gate.reason}」拦着。点一下再加一道手动锁`;
+          ? "点一下冻结整框：下次执行不会自动换掉这里的内容（逐词锁在词片最左边，是另一回事）"
+          : `已因「${gate.reason}」拦着。点一下再上一层冻结整框`;
   }
 
   st.status.textContent = note;
@@ -650,16 +673,35 @@ function writeBoxText(node, text) {
   app.graph?.change?.();
 }
 
-function applyInflow(node, raw, count, why) {
+// 把锁定词并进一段新文本：缺的补到末尾（走后端同一条 merge_pins，避免两套实现）
+async function mergePinsText(node, text) {
+  const pairs = node.__tgs?.chips?.pinsPairs?.() || [];
+  if (!pairs.length) return text;
+  try {
+    const res = await api.fetchApi(
+      `/prompt_toggle/split?text=${encodeURIComponent(text)}&pins=${encodeURIComponent(JSON.stringify(pairs))}`,
+      { cache: "no-store" },
+    );
+    const data = await res.json();
+    return typeof data.text === "string" ? data.text : text;
+  } catch (e) {
+    console.warn("[TextGateSplit] 锁词补位失败：", e);
+    return text;
+  }
+}
+
+async function applyInflow(node, raw, count, why) {
   const st = node.__tgs;
   const w = textWidget(node);
   if (!st || !w) return;
-  w.value = raw;
+  // 锁定词：新词里有 -> 用新词的位置；没有 -> 补到末尾（后端算，界面与输出同一条规则）
+  const merged = await mergePinsText(node, raw);
+  w.value = merged;
   // 记住这次流进来的是哪一句：以后拿它比“你动没动过手”
-  setProp(node, "tgs_base", raw);
+  setProp(node, "tgs_base", merged);
   setProp(node, "tgs_mbase", "");
   setProp(node, "tgs_lock", "");
-  st.baseline = raw;
+  st.baseline = merged;
   st.dirty = false;
   st.blocked = false;
   st.armed = null;
@@ -678,11 +720,21 @@ function applyInflow(node, raw, count, why) {
   flash(node, msg, "info", 4000);
 }
 
-function clearBox(node) {
+async function clearBox(node) {
   const st = node.__tgs;
   const w = textWidget(node);
   if (!st || !w) return;
-  w.value = "";
+
+  // 锁定词有最高权限：清空只清掉没锁的部分（后端按 keep= 算，标点规则和删词同一套）
+  const chips = st.chips;
+  const pins = chips?.pinKeys?.() || [];
+  let kept = "";
+  if (pins.length) {
+    const data = await chips.keepOnlyPinned();
+    kept = data?.text ?? "";
+  }
+
+  w.value = kept;
   setProp(node, "tgs_base", "");
   setProp(node, "tgs_mbase", "");
   setProp(node, "tgs_lock", "");
@@ -693,12 +745,14 @@ function clearBox(node) {
   st.at = "";
   st.flash = null;
   st.rsvLast = 0;
-  writeSeen(node, []); // 蓄水账本一起清，否则清空后上游的老词永远蓄不进来
+  // 账本：清掉旧词让它们能重新蓄，但锁定词的键要留着——否则上游会把锁词再蓄一遍，出现重复
+  writeSeen(node, pins);
   node.setDirtyCanvas?.(true, true);
   app.graph?.change?.();
   refreshSegments(node);
   render(node);
-  flash(node, rsvOn(node) ? "已清空 · 上游的词会重新蓄进来" : "已开闸 · 下次执行上游会流进来", "info", 3000);
+  const tail = pins.length ? ` · 锁定的 ${pins.length} 段保留` : "";
+  flash(node, (rsvOn(node) ? "已清空 · 上游的词会重新蓄进来" : "已开闸 · 下次执行上游会流进来") + tail, "info", 3000);
 }
 
 // 锁按钮：只负责手动锁本身。🔓 -> 锁上；🔒 -> 解开（并把当前内容认作新基线）
@@ -710,11 +764,11 @@ function onLockClick(node) {
   const gate = gateState(node);
   if (gate.manualLock) {
     acceptAsBaseline(node);
-    flash(node, "已解锁（当前内容作为新基线）", "info", 3000);
+    flash(node, "已解冻（当前内容作为新基线）", "info", 3000);
   } else {
     setProp(node, "tgs_lock", "1");
     app.graph?.change?.();
-    flash(node, "已锁定 · 下次执行不会换掉这里的内容", "warn", 3500);
+    flash(node, "已冻结整框 · 下次执行不会换掉这里的内容", "warn", 3500);
   }
   st.sig = "";
   render(node);
@@ -845,6 +899,8 @@ function installPromptInjection() {
           on: rsvOn(node) ? 1 : 0,
           seen: readSeen(node),
         });
+        // 锁定词：[[键, 词], …]，后端在换词/蓄水后按它兜底
+        entry.inputs.pins = JSON.stringify(node.__tgs.chips?.pinsPairs?.() || []);
       }
     }
     return res;
@@ -966,6 +1022,8 @@ function setupNode(node) {
     getText: () => sourceText(node),
     writeText: (text) => writeBoxText(node, text),
     writeMask: (arr) => writeMask(node, arr),
+    readPins: () => readPins(node),
+    writePins: (keys) => writePins(node, keys),
     after: () => { cancelFlash(node); render(node); },
   });
 

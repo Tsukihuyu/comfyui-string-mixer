@@ -98,6 +98,24 @@ const CSS = `
   white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
 }
 .smchip.editing { cursor: text; }
+
+/* 逐词锁：词片最左的小锁。纯图标（内联 SVG + currentColor），不引入第三种底色。
+   未锁 = 开锁轮廓 + 低透明度（不抢眼但位置固定）；已锁 = 闭合锁 + 实心。
+   拒绝删除时闪一下（.deny），不弹窗。 */
+.smchip .smlock {
+  align-self: center; display: flex; align-items: center;
+  width: 12px; height: 13px; padding: 0 3px 0 1px; margin-right: 4px;
+  opacity: .34; cursor: pointer; flex: 0 0 auto; transition: opacity .12s ease;
+}
+.smchip .smlock:hover { opacity: .8; }
+.smchip .smlock.on { opacity: 1; }
+.smchip .smlock svg { display: block; width: 11px; height: 12px; }
+.smchip .smlock.deny { animation: smlock-deny .32s ease; }
+@keyframes smlock-deny {
+  0%, 100% { transform: translateX(0); opacity: 1; }
+  25% { transform: translateX(-2px); }
+  60% { transform: translateX(2px); }
+}
 `;
 
 export function ensureChipStyles() {
@@ -113,6 +131,21 @@ function fmtWeight(w) {
   if (!Number.isFinite(n)) return "1";
   return String(Number(n.toFixed(2)));
 }
+
+// 逐词锁的两个形态：都是纯线条 + currentColor（跟着词片的绿/红走），不引入新颜色。
+// 差别靠三处叠加，保证 11px 大小下也分得清：挂环闭合与否（轮廓不同）、箱体实心与否、透明度。
+const LOCK_SVG_ON = `<svg viewBox="0 0 11 12" aria-hidden="true">
+  <rect x="1.1" y="5.1" width="8.8" height="6" rx="1.5" fill="currentColor" fill-opacity=".38"
+        stroke="currentColor" stroke-width="1.9"/>
+  <path d="M3.1 5.1V3.4a2.4 2.4 0 0 1 4.8 0v1.7" fill="none" stroke="currentColor"
+        stroke-width="1.9" stroke-linecap="round"/>
+</svg>`;
+const LOCK_SVG_OFF = `<svg viewBox="0 0 11 12" aria-hidden="true">
+  <rect x="1.1" y="5.1" width="8.8" height="6" rx="1.5" fill="none"
+        stroke="currentColor" stroke-width="1.1"/>
+  <path d="M1.9 5.1V3.6a2.6 2.6 0 0 1 5.2 0" fill="none" stroke="currentColor"
+        stroke-width="1.1" stroke-linecap="round"/>
+</svg>`;
 
 // 指针落在哪个位置：在「拖动开始时冻结的矩形」里找，返回摘掉被拖那一个之后应插入的下标。
 // 为什么用冻结坐标：预览会实时重排词片，拿实时布局算落点就会跟手指互相推让、来回跳；
@@ -154,6 +187,8 @@ export class ChipList {
     this.undoTimer = null;
     this.gapBar = null;     // 空白处双击插入的悬停竖线
     this.gapAt = -1;
+    // 逐词锁：按归一化词键存（不是位置），所以文本重排/去重之后锁还认得住那个词
+    this.pins = new Set(Array.isArray(opts.readPins?.()) ? opts.readPins() : []);
     ensureChipStyles();
     if (opts.list) {
       opts.list.classList.add("sm-list");
@@ -195,6 +230,70 @@ export class ChipList {
   isOn(i) {
     const mask = this.st.mask || [];
     return mask[i] !== 0;
+  }
+
+  // ---------------------------------------------------------------- 逐词锁
+
+  // 这一段是不是被钉住了。键由后端给（st.keys），前端不自己算，避免两套归一化漂移。
+  isPinned(i) {
+    const key = (this.st.keys || [])[i];
+    return !!key && this.pins.has(key);
+  }
+
+  // 钉住的段（键 + 原文），按当前顺序：注入 prompt、换词补位都用它
+  pinsPairs() {
+    const segs = this.st.segs || [];
+    return segs
+      .map((body, i) => [this.st.keys?.[i], body])
+      .filter(([key]) => key && this.pins.has(key));
+  }
+
+  pinKeys() {
+    return this.pinsPairs().map(([key]) => key);
+  }
+
+  // 只剩锁定词（清空之后）——闸门要靠它把这种状态当成"框是空的"
+  lockedOnly() {
+    const segs = this.st.segs || [];
+    return segs.length > 0 && this.isPinned(0) && segs.every((_s, i) => this.isPinned(i));
+  }
+
+  togglePin(i) {
+    const key = (this.st.keys || [])[i];
+    if (!key) return;
+    if (this.pins.has(key)) this.pins.delete(key);
+    else this.pins.add(key);
+    this.opts.writePins?.([...this.pins]);
+    this.render();               // 锁图标要换成另一个形态，重画一次最省事
+    this.opts.after?.();
+  }
+
+  // 拒绝删除时：锁图标晃一下，不弹窗也不改任何状态
+  denyLock(i) {
+    const el = this.opts.list?.querySelector(`.smchip[data-i="${i}"] .smlock`);
+    if (!el) return;
+    el.classList.remove("deny");
+    void el.offsetWidth;         // 强制回流，让同一个动画能再放一次
+    el.classList.add("deny");
+    setTimeout(() => el.classList.remove("deny"), 360);
+  }
+
+  // 清空框：只留锁定词（后端算，标点规则和删词同一套）
+  async keepOnlyPinned() {
+    const keys = this.pinKeys();
+    if (!keys.length) return null;
+    const text = this.opts.getText();
+    try {
+      const res = await api.fetchApi(
+        `/prompt_toggle/split?text=${encodeURIComponent(text)}&keep=${encodeURIComponent(JSON.stringify(keys))}`,
+        { cache: "no-store" },
+      );
+      const data = await res.json();
+      return typeof data.text === "string" ? data : { text: "" };
+    } catch (e) {
+      console.warn("[String-Mixer] 清空保锁失败：", e);
+      return null;
+    }
   }
 
   // ---------------------------------------------------------------- 渲染
@@ -288,6 +387,21 @@ export class ChipList {
     b.className = this.chipClass(i);
     b.title = this.chipTitle(i);
 
+    const lock = document.createElement("span");
+    const pinned = this.isPinned(i);
+    lock.className = `smlock${pinned ? " on" : ""}`;
+    lock.innerHTML = pinned ? LOCK_SVG_ON : LOCK_SVG_OFF;
+    lock.title = pinned
+      ? "已钉住：不会被 × / 双击清空 / ✕ 清空框 / 换词 / 蓄水删掉（点一下解开）"
+      : "点一下钉住这一段（最高权限：不被删除、不被清空、不被换词冲掉）";
+    lock.setAttribute("role", "button");
+    lock.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); });
+    lock.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.togglePin(i);
+    });
+
     const col = document.createElement("span");
     col.className = "wcol";
     col.append(
@@ -299,7 +413,7 @@ export class ChipList {
     lbl.className = "lbl";
     lbl.textContent = seg;
 
-    const kids = [col, lbl];
+    const kids = [lock, col, lbl];
     if (w !== 1) {
       const badge = document.createElement("span");
       badge.className = "wbadge";
@@ -632,7 +746,12 @@ export class ChipList {
       return;
     }
     if (!clean) {
+      const wasPinned = ed.mode !== "insert" && this.isPinned(ed.i);
       this.render();
+      if (wasPinned) {         // 钉住的段也不许"改成空"来删
+        this.denyLock(ed.i);
+        return;
+      }
       this.del(ed.i);      // 清空 = 删掉这一段（带撤销）
       return;
     }
@@ -759,6 +878,10 @@ export class ChipList {
   }
 
   async del(i) {
+    if (this.isPinned(i)) {        // 钉住的段删不掉：晃一下锁图标就完事
+      this.denyLock(i);
+      return;
+    }
     const data = await this.mutate(`drop=${i}`);
     if (!data) return;
     this.pushUndo();
@@ -839,6 +962,7 @@ export class ChipList {
     const st = this.st;
     const segs = data.segments || [];
     st.segs = segs;
+    st.keys = data.keys || [];
     st.weights = data.weights || [];
     st.mask = Array.isArray(mask) && mask.length === segs.length
       ? mask

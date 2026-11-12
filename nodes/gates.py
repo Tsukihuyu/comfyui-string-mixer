@@ -6,7 +6,14 @@
 """
 import json
 
-from .toggle import apply_toggle, split_prompt_segments, split_spans
+from .textscan import append_chunk, seg_key
+from .toggle import (
+    apply_toggle,
+    merge_pins,
+    parse_pins,
+    split_prompt_segments,
+    split_spans,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -17,15 +24,6 @@ from .toggle import apply_toggle, split_prompt_segments, split_spans
 #
 # 为什么按段而不是按整段文本：上游常常只在中间插一个词（或改一个词），整段比对
 # 会把前面所有词再蓄一遍。按段差集就只蓄那一个词。
-
-
-def seg_key(body):
-    """账本的归一键：大小写折叠、下划线当空格、连续空白压缩（刻意不剥权重）。
-
-    * "Blue_Hair" 与 "blue hair" -> 同一段，不会重复蓄
-    * "(blue hair:1.1)" 与 "blue hair" -> 两段（上游改权重能蓄进来）
-    """
-    return " ".join(str(body).casefold().replace("_", " ").split())
 
 
 def parse_reservoir(blob):
@@ -41,31 +39,21 @@ def parse_reservoir(blob):
     return bool(cfg.get("on")), seen
 
 
-def append_chunk(body, tail):
-    """给前端的追加串：带上分隔符，直接接在框内文本末尾。"""
-    raw = str(body or "")
-    if not raw.strip():
-        return tail
-    if raw.rstrip(" \t").endswith("\n"):
-        return tail  # 框里已经是换行结尾：新词另起一行
-    t = raw.rstrip()
-    if t[-1] in ",，;；" or t[-1] in ".。!！?？":
-        return " " + tail
-    return ", " + tail
-
-
-def absorb_upstream(body, raw, seen=()):
+def absorb_upstream(body, raw, seen=(), pins=()):
     """把上游里"账本没有的段"按原顺序接到 body 末尾。
 
     返回 (新文本, 新增段, 新增的归一键, 追加串)。
       * 上游在中间插了一个词 -> 只有那一个词是新增
       * 上游完全重复        -> 一个都不加（新文本 == body）
     这里没有"强制再蓄"这一档：点按钮和正常排队走的是同一条路，只蓄新词。
+
+    pins 是逐词锁的键：锁词已经钉在框里了，上游再送一遍也绝不能蓄第二份，
+    所以它和账本一起当成"已经有了"。
     """
     body = str(body or "")
     raw = str(raw or "")
     ledger = list(seen)
-    known = set(ledger)
+    known = set(ledger) | {str(k) for k in (pins or ())}
     fresh, new_keys, taken = [], [], set()
     if raw.strip():
         for seg, _before, _start, _end in split_spans(raw):
@@ -265,6 +253,10 @@ class TextGateSplit:
                     "forceInput": True,
                     "tooltip": "蓄水模式开关 + 已吸收账本（界面注入的 JSON），不用手填",
                 }),
+                "pins": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "锁定词（[[键, 词], …] 的 JSON），由节点界面注入，不用手填",
+                }),
             },
         }
 
@@ -274,18 +266,22 @@ class TextGateSplit:
     CATEGORY = "String-Mixer"
     OUTPUT_NODE = True
 
-    def run(self, text, join_mode, mask="", source=None, adopt="", reservoir=""):
+    def run(self, text, join_mode, mask="", source=None, adopt="", reservoir="", pins=""):
         linked, parts = snapshot_source(source)
         raw = "\n\n".join(parts)
         body = str(text)
         segs = split_prompt_segments(body)
         arr = _mask_array(mask, len(segs))
+        lock_pins = parse_pins(pins)
 
         # 蓄水：永不拦、不看动没动手，只把账本里没有的段接到框内文本末尾。
         # 手动点按钮和正常排队走同一条路（没有"强制再蓄"那一档，避免误解）。
         on, seen = parse_reservoir(reservoir)
         if on:
-            out, fresh, new_keys, chunk = absorb_upstream(body, raw, seen)
+            out, fresh, new_keys, chunk = absorb_upstream(
+                body, raw, seen, [k for k, _b in lock_pins]
+            )
+            out = merge_pins(out, lock_pins)  # 锁词兜底：保证它在，且不重复
             return {
                 "ui": {
                     "ts_source": [raw],
@@ -314,8 +310,8 @@ class TextGateSplit:
         blocked = 0
         adopted = 0
         if not body.strip() or adopt_on:
-            # 闸门开着：上游原样通过（不炸、不重拼）
-            out = raw
+            # 闸门开着：上游原样通过（不炸、不重拼）；锁定词按规则补位
+            out = merge_pins(raw, lock_pins)
             used = 1 if linked else 0
             adopted = 1 if adopt_on else 0
             all_off = 0
