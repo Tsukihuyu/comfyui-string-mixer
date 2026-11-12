@@ -1,17 +1,19 @@
 // 共用的「词条面板」：炸出来的每个词 = 一个 chip
 //
 // Prompt Toggle 与 闸门炸词 共用这一份，免得两套行为漂移：
-//   单击      = 开 / 关（绿 / 红）
+//   单击      = 开 / 关（绿 / 红）—— 为双击让路，延迟 220ms 才真的切换
+//   双击      = 就地改这一段（词片原地变输入框；Enter / 点别处提交，Esc 取消）
 //   按住拖动  = 换位置（松手落位；蓝线标出落点）
 //   左侧 ＋/－ = 权重 ±0.05（上＋下－；写进文本框，1.00 时自动去括号）
 //   右侧 ×    = 从文本框里彻底删掉这一段（可撤销）
 //
-// 所有改文本的操作都交给后端算（/prompt_toggle/split 的 drop / move / weight），
+// 所有改文本的操作都交给后端算（/prompt_toggle/split 的 drop / move / weight / edit），
 // 前端只负责画和写回，标点规则只有一处实现。
 
 import { api } from "../../scripts/api.js";
 
 const DRAG_SLOP = 4;      // 移动超过这么多像素才算拖动，否则算单击
+const DOUBLE_MS = 220;    // 双击判定窗口；单击的开关也压这么久，用户点了两下就不闪
 const UNDO_MS = 10000;    // 撤销窗口
 const WEIGHT_STEP = 0.05; // 与后端 nodes/toggle.py 的 WEIGHT_STEP 对齐
 
@@ -74,6 +76,16 @@ const CSS = `
 
 /* 拖动预览：被拖的词片半透明，并实时插到目标位置，把两边的词挤开（不用落点线） */
 .sm-hint { font-size: 11px; opacity: .55; padding: 4px 2px; }
+
+/* 双击就地编辑：词片本体换成一个输入框，宽度跟着内容走（颜色仍继承开/关的红绿） */
+.smchip.editing { cursor: text; }
+.smchip .smchip-edit {
+  align-self: center; min-width: 48px; max-width: 100%;
+  font: inherit; font-size: 12px; line-height: 15px;
+  color: inherit; background: rgba(0,0,0,.35);
+  border: 1px solid currentColor; border-radius: 7px;
+  padding: 0 4px; margin: 0; outline: none; box-sizing: border-box;
+}
 `;
 
 export function ensureChipStyles() {
@@ -123,6 +135,9 @@ export class ChipList {
     this.node = node;
     this.opts = opts;
     this.drag = null;
+    this.editing = null;   // {i, box, input, seg} 正在编辑的那一段
+    this.clickTimer = null; // 待生效的单击开关（双击判定窗口内先压着）
+    this.lastClick = null;  // {i, t, seg} 上一次单击
     this.undoState = null;
     this.undoTimer = null;
     ensureChipStyles();
@@ -142,6 +157,7 @@ export class ChipList {
 
   render() {
     if (this.drag?.moved) return; // 拖动中别重画，会打断手势
+    if (this.editing) return;     // 编辑中别重画：一重画输入框和光标就没了
     const { list, countEl } = this.opts;
     if (!list) return;
     const st = this.st;
@@ -174,6 +190,7 @@ export class ChipList {
     b.className = `smchip ${on ? "on" : "off"}${w !== 1 ? " wtd" : ""}`;
     b.title = [
       on ? "单击关掉这一段（不进输出）" : "单击打开这一段",
+      "双击 = 就地改这个词",
       "按住拖动 = 换位置",
       "左侧 ＋/－ = 权重 ±0.05",
       "右侧 × = 从文本框里删掉（可撤销）",
@@ -243,6 +260,10 @@ export class ChipList {
   onPointerDown(e, i) {
     if (e.button !== 0) return;
     if (e.target?.closest?.(".wbtn, .smchip-del")) return; // 加减号/删除键自己处理
+    if (this.editing) {
+      if (this.editing.i !== i) this.finishEdit(true); // 点在别的词上 = 点别处，先提交
+      return;                                          // 这一下不再当成拖动/单击
+    }
     e.preventDefault();
     e.stopPropagation();
     const chip = e.currentTarget;
@@ -308,7 +329,7 @@ export class ChipList {
     if (!d) return;
     d.chip?.classList.remove("pressing", "dragging");
     if (!d.moved) {
-      this.toggle(d.i);       // 单击 = 开关
+      this.handleTap(d.i);    // 单击 = 开关，但先让双击有机会抢走
       return;
     }
     if (d.slot === d.i) {
@@ -316,6 +337,174 @@ export class ChipList {
       return;
     }
     this.move(d.i, d.slot);
+  }
+
+  // ---------------------------------------------------------------- 单击 / 双击
+
+  // 单击不能立刻切换：两次点击要能合成一次双击。压 DOUBLE_MS 再 toggle，
+  // 期间来了第二下就取消切换、改为就地编辑——界面上一格都不会闪。
+  handleTap(i) {
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const seg = (this.st.segs || [])[i];
+    if (seg == null) return;
+    const last = this.lastClick;
+    if (last && last.i === i && now - last.t <= DOUBLE_MS) {
+      this.lastClick = null;
+      this.cancelPendingClick();
+      this.beginEdit(i);
+      return;
+    }
+    this.flushPendingClick(); // 上一下点的是别的词：让它立刻生效，别被吞掉
+    this.lastClick = { i, t: now, seg };
+    this.cancelPendingClick();
+    this.clickTimer = setTimeout(() => {
+      this.clickTimer = null;
+      this.lastClick = null;
+      // 这 220ms 里文本可能被改过：那一段还是原来那个词才切换，否则放弃
+      if ((this.st.segs || [])[i] !== seg) return;
+      this.toggle(i);
+    }, DOUBLE_MS);
+  }
+
+  cancelPendingClick() {
+    if (this.clickTimer) clearTimeout(this.clickTimer);
+    this.clickTimer = null;
+  }
+
+  flushPendingClick() {
+    const l = this.lastClick;
+    this.cancelPendingClick();
+    this.lastClick = null;
+    if (!l) return;
+    if ((this.st.segs || [])[l.i] === l.seg) this.toggle(l.i);
+  }
+
+  // ---------------------------------------------------------------- 双击就地编辑
+
+  beginEdit(i) {
+    const list = this.opts.list;
+    const seg = (this.st.segs || [])[i];
+    if (this.editing || seg == null || !list) return;
+    const chip = list.querySelector(`.smchip[data-i="${i}"]`);
+    if (!chip) return;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "smchip-edit";
+    input.value = seg;              // 原文整段交给你改（(cat:1.2) 连括号一起）
+    input.spellcheck = false;
+    input.autocomplete = "off";
+
+    // 输入框宽度跟着内容走：用 canvas 量（输入框自己的 scrollWidth 要等布局）
+    const fitWidth = () => {
+      const cs = getComputedStyle(input);
+      const ctx = (this._measure ||= document.createElement("canvas").getContext("2d"));
+      if (!ctx) return;
+      ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      const w = ctx.measureText(input.value || " ").width;
+      input.style.width = `${Math.min(240, Math.max(48, Math.ceil(w) + 18))}px`;
+    };
+
+    // chip 的手势处理器会 preventDefault，光标和选区会被一起吃掉 -> 这里拦住
+    input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    input.addEventListener("mousedown", (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229) return; // 输入法组字中，别当提交
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        this.finishEdit(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        this.finishEdit(false);
+      }
+    });
+    input.addEventListener("input", () => fitWidth());
+    input.addEventListener("blur", () => {
+      if (this.editing) this.finishEdit(true); // 点到别处也算提交
+    });
+
+    // <button> 里不能塞 <input>（交互元素套交互元素，浏览器会闹脾气），
+    // 所以编辑期间把一个同色的 <div> 换上去，退出编辑后整体重画。
+    const box = document.createElement("div");
+    box.className = `${chip.className.replace(/\bediting\b/g, "").trim()} editing`;
+    box.dataset.i = String(i);
+    box.append(input);
+    chip.replaceWith(box);
+
+    this.editing = { i, box, input, seg };
+
+    // 编辑期间点面板任何其它地方 = 提交（blur 在 preventDefault 的手势里不一定来）
+    this._outside = (e) => {
+      if (!this.editing) return;
+      if (!this.opts.list?.isConnected) {
+        this.detachOutside();
+        return;
+      }
+      if (this.editing.box.contains(e.target)) return;
+      this.finishEdit(true);
+    };
+    document.addEventListener("pointerdown", this._outside, true);
+
+    input.focus();
+    input.select();
+    fitWidth();
+  }
+
+  detachOutside() {
+    if (this._outside) document.removeEventListener("pointerdown", this._outside, true);
+    this._outside = null;
+  }
+
+  finishEdit(commit) {
+    const ed = this.editing;
+    if (!ed) return;
+    this.editing = null;   // 先清干净：blur 再来一次就什么也不做
+    this.detachOutside();
+    const val = ed.input.value;
+    ed.input.remove();
+    ed.box.classList.remove("editing");
+    ed.box.remove();       // 原地留个空位，随后的 render 会把整排词重画
+
+    if (!commit) {
+      this.render();
+      return;
+    }
+    const clean = val.trim();
+    if (clean === ed.seg) {
+      this.render();
+      return;
+    }
+    if (!clean) {
+      this.render();
+      this.del(ed.i);      // 清空 = 删掉这一段（带撤销）
+      return;
+    }
+    this.edit(ed.i, clean);
+  }
+
+  // 改一段：只替换那一段的原文区间，别处标点不动；新文本写回编辑框
+  async edit(i, body) {
+    const data = await this.mutate(`edit=${i},${encodeURIComponent(body)}`);
+    if (!data) {
+      this.render();
+      return;
+    }
+    this.pushUndo();
+    const st = this.st;
+    const oldMask = st.mask || [];
+    const oldN = (st.segs || []).length;
+    const newN = (data.segments || []).length;
+    // 这一段改完可能变成好几段（词里写了逗号）：按原段的开关复制 k 份插回原位
+    const k = Math.max(1, newN - (oldN - 1));
+    const mask = [];
+    for (let j = 0; j < oldN; j++) {
+      const v = oldMask[j] ? 1 : 0;
+      if (j === i) for (let c = 0; c < k; c++) mask.push(v);
+      else mask.push(v);
+    }
+    this.applyNew(data, mask);
   }
 
   // ---------------------------------------------------------------- 操作
@@ -387,6 +576,9 @@ export class ChipList {
   async mutate(query) {
     if (this.busy) return null;
     this.busy = true;
+    // 任何改文本的操作都把「待生效的单击开关」作废：那段词马上就要变样了
+    this.cancelPendingClick();
+    this.lastClick = null;
     const text = this.opts.getText();
     try {
       const res = await api.fetchApi(

@@ -282,7 +282,7 @@ function setupNode(node) {
   panel.style.cssText =
     "display:flex;flex-direction:column;gap:6px;height:100%;box-sizing:border-box;" +
     "padding:6px;border-radius:8px;background:rgba(0,0,0,.18);";
-  panel.title = "点片段切换开关：绿色=开启，红色=关闭";
+  panel.title = "点片段切换开关：绿色=开启，红色=关闭；双击一个词就地改它";
   panel.addEventListener("pointerdown", (e) => e.stopPropagation());
 
   const bar = document.createElement("div");

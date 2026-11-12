@@ -105,6 +105,7 @@ Its defining behaviour: **the node decides by whether you have interfered with t
 
 - **Follow automatically**: untouched text is replaced by the latest upstream text on every run.
 - **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on.
+- **Edit a chip in place**: double-click a chip and it becomes an input box; Enter (or clicking elsewhere) replaces only that segment — every other character and delimiter stays put. `Esc` cancels, clearing it deletes the segment.
 - **Chip weight**: `＋` / `－` on the left of a chip adjusts its weight and writes the result into the text box; a LoRA segment has its own strength field adjusted instead.
 - **Drag to reorder**: hold a chip, drag it, release — the text box is reordered and the switch and weight travel with that word.
 - **Edit by hand**: changing the text or deleting a chip puts the node into manual takeover.
@@ -139,6 +140,7 @@ Testing whether a word actually affects the result no longer means copying, dele
 Prompt Toggle recognises independent segments and turns them into interactive chips:
 
 - **Enable/disable per chip**: click a chip to decide whether it takes part in the output.
+- **Edit in place**: double-click a chip to rewrite that one segment; `Esc` cancels, clearing it deletes the segment.
 - **The text is kept**: a disabled chip is not deleted; switch it back on and it returns.
 - **Delete for real**: remove a chip you no longer want, with a short undo window.
 - **Chip weight**: `＋` / `－` on the left add or subtract 0.05; a bare word becomes `(blue hair:1.15)` and goes back to bare form at 1.00.

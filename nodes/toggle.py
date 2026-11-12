@@ -324,6 +324,27 @@ def set_weight(text, index, delta, pairs=None):
 
 
 
+def edit_segment(text, index, new_body, pairs=None):
+    """把第 index 段整段换成 new_body，其余字符一个都不动。
+
+    只替换这一段的原文区间 text[start:end]：前后的分隔符、别的段的标点、
+    别的段的权重全部原样保留——和 set_weight 是同一套「原地改一段」的做法。
+    new_body 去首尾空白后为空 = 等同删掉这一段（留个空段没有意义）。
+    """
+    segs = list(pairs) if pairs is not None else split_spans(text)
+    if not segs or not (0 <= index < len(segs)):
+        return text
+    body, _before, start, end = segs[index]
+    if text[start:end] != body:  # 下标对不上就别动，宁可不动也不乱改
+        return text
+    clean = (new_body or "").strip()
+    if clean == body:
+        return text
+    if not clean:
+        return drop_segment(text, index, segs)
+    return text[:start] + clean + text[end:]
+
+
 def merge_upstream(main, upstream):
     """上游在前、本节点结果在后。上游原样保留（不参与开关），空则忽略。"""
     extra = (upstream or "").strip()
@@ -385,6 +406,7 @@ if PromptServer is not None:
           drop=<i>            删掉第 i 段（词片右上角的 ×）
           move=<from>,<to>    把第 from 段挪到第 to 位（按住拖动排序）
           weight=<i>,<delta>  给第 i 段加减权重（词片左边的 ＋/－）
+          edit=<i>,<新词>     把第 i 段整段换成新词（双击词片就地编辑；只改这一段）
         让服务端算，前端就不用自己拼标点，也就不会和 original 模式两套实现。
         """
         text = request.query.get("text", "")
@@ -419,6 +441,14 @@ if PromptServer is not None:
             try:
                 idx, delta = raw_weight.split(",", 1)
                 new_text = set_weight(text, int(idx), float(delta))
+            except (TypeError, ValueError):
+                pass
+
+        raw_edit = request.query.get("edit")
+        if new_text is None and raw_edit:
+            try:
+                idx, body = raw_edit.split(",", 1)
+                new_text = edit_segment(text, int(idx), body)
             except (TypeError, ValueError):
                 pass
 

@@ -939,7 +939,7 @@ function setupNode(node) {
   // 删除后的撤销入口：平时 display:none，点 × 之后出现 10 秒
   const undoBtn = mk("撤销", () => undoDelete(node));
   undoBtn.dataset.undo = "1";
-  undoBtn.title = "把上一步操作（删除 / 拖动排序 / 权重）退回原来的文本（10 秒内有效）";
+  undoBtn.title = "把上一步操作（删除 / 拖动排序 / 权重 / 编辑）退回原来的文本（10 秒内有效）";
   bar.append(
     mk("全开", () => { st.mask = st.segs.map(() => 1); writeMask(node, st.mask); renderChips(node); render(node); }),
     mk("全关", () => { st.mask = st.segs.map(() => 0); writeMask(node, st.mask); renderChips(node); render(node); }),
@@ -962,7 +962,7 @@ function setupNode(node) {
     list,
     countEl,
     undoBtn,
-    hint: "框里有字后，这里会按标点炸成可点的片段（点一下关掉/打开，按住拖动换位置）",
+    hint: "框里有字后，这里会按标点炸成可点的片段（点一下关掉/打开，双击改词，按住拖动换位置）",
     getText: () => sourceText(node),
     writeText: (text) => writeBoxText(node, text),
     writeMask: (arr) => writeMask(node, arr),
