@@ -22,6 +22,10 @@ It is a small toolkit that grew out of real use. I hope it makes your ComfyUI wo
 
 ## Changelog
 
+### 1.3.1 — the weight +/- no longer drifts upward
+
+- The `＋` / `－` weight buttons are now drawn as vectors. They used fullwidth glyphs, and although the boxes were centred the ink sat 7px / 4px above the baseline by different amounts — which read as each symbol drifting upward and sitting unevenly.
+
 ### 1.3.0 — chips became editable, and pinnable
 
 - **Edit a chip in place**: double-click a chip and it turns into a wrapping editor that grows with the text (long segments are no longer squeezed into a narrow slit). Only that segment is replaced; every other character stays put. `Esc` cancels, clearing deletes it.
