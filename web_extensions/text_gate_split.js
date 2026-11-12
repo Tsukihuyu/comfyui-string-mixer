@@ -941,9 +941,9 @@ function setupNode(node) {
   undoBtn.dataset.undo = "1";
   undoBtn.title = "把上一步操作（删除 / 拖动排序 / 权重 / 编辑）退回原来的文本（10 秒内有效）";
   bar.append(
-    mk("全开", () => { st.mask = st.segs.map(() => 1); writeMask(node, st.mask); renderChips(node); render(node); }),
-    mk("全关", () => { st.mask = st.segs.map(() => 0); writeMask(node, st.mask); renderChips(node); render(node); }),
-    mk("反选", () => { st.mask = st.mask.map((m) => (m ? 0 : 1)); writeMask(node, st.mask); renderChips(node); render(node); }),
+    mk("全开", () => st.chips?.applyMask(st.segs.map(() => 1))),
+    mk("全关", () => st.chips?.applyMask(st.segs.map(() => 0))),
+    mk("反选", () => st.chips?.applyMask(st.mask.map((m) => (m ? 0 : 1)))),
     undoBtn,
     countEl
   );

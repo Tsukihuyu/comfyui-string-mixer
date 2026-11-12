@@ -288,21 +288,9 @@ function setupNode(node) {
   const bar = document.createElement("div");
   bar.style.cssText = "display:flex;gap:6px;flex:0 0 auto;align-items:center;";
   bar.append(
-    smallButton("全开", () => {
-      st.mask = st.segs.map(() => 1);
-      writeMask(node, st.mask);
-      render(node);
-    }),
-    smallButton("全关", () => {
-      st.mask = st.segs.map(() => 0);
-      writeMask(node, st.mask);
-      render(node);
-    }),
-    smallButton("反选", () => {
-      st.mask = st.mask.map((m) => (m ? 0 : 1));
-      writeMask(node, st.mask);
-      render(node);
-    }),
+    smallButton("全开", () => st.chips?.applyMask(st.segs.map(() => 1))),
+    smallButton("全关", () => st.chips?.applyMask(st.segs.map(() => 0))),
+    smallButton("反选", () => st.chips?.applyMask(st.mask.map((m) => (m ? 0 : 1)))),
     (() => {
       const badge = document.createElement("span");
       badge.textContent = "＋上游在前";
@@ -364,7 +352,9 @@ function setupNode(node) {
     getText: () => String(getWidget(node, "text")?.value ?? ""),
     writeText: (text) => writeText(node, text),
     writeMask: (arr) => writeMask(node, arr),
-    after: () => render(node),
+    // after 只做「让画布重画」这类轻活：词片颜色由 ChipList 就地换，
+    // 这里若再调 render(node) 会把整排元素重建，绿↔红的过渡就没起点、不会动。
+    after: () => node.setDirtyCanvas?.(true, true),
   });
 
   if (node.size && node.size[1] < MIN_NODE_H) node.size[1] = MIN_NODE_H;

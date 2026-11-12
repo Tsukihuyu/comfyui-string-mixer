@@ -26,7 +26,10 @@ const CSS = `
   font-size: 12px; line-height: 17px; padding: 1px 6px 1px 3px; border-radius: 11px;
   cursor: pointer; max-width: 100%; white-space: normal; word-break: break-word;
   text-align: left; border: 1px solid transparent; font-weight: 500;
-  transition: filter .12s ease, opacity .12s ease, border-color .12s ease;
+  /* 绿↔红要「淡」过去：颜色属性全部参与过渡，开关一下能看出插件干了活。
+     前提是开关时元素不重建——见 paintChips()。 */
+  transition: background-color .28s ease, border-color .28s ease, color .28s ease,
+              filter .12s ease, opacity .12s ease;
   font-family: inherit; user-select: none;
 }
 .smchip:hover { filter: brightness(1.3); }
@@ -158,17 +161,13 @@ export class ChipList {
   render() {
     if (this.drag?.moved) return; // 拖动中别重画，会打断手势
     if (this.editing) return;     // 编辑中别重画：一重画输入框和光标就没了
-    const { list, countEl } = this.opts;
+    const { list } = this.opts;
     if (!list) return;
     const st = this.st;
     const segs = st.segs || [];
     const weights = st.weights || [];
 
-    if (countEl) {
-      const on = segs.reduce((n, _, i) => n + (this.isOn(i) ? 1 : 0), 0);
-      countEl.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
-      if (countEl.dataset) countEl.dataset.off = segs.length && on === 0 ? "1" : "";
-    }
+    this.updateCount();
 
     if (!segs.length) {
       const hint = document.createElement("div");
@@ -181,20 +180,70 @@ export class ChipList {
     list.replaceChildren(...segs.map((seg, i) => this.chipEl(seg, i, weights[i])));
   }
 
+  updateCount() {
+    const { countEl } = this.opts;
+    if (!countEl) return;
+    const segs = this.st.segs || [];
+    const on = segs.reduce((n, _, i) => n + (this.isOn(i) ? 1 : 0), 0);
+    countEl.textContent = segs.length ? `开 ${on} / ${segs.length}` : "";
+    if (countEl.dataset) countEl.dataset.off = segs.length && on === 0 ? "1" : "";
+  }
+
+  // 词片 class 的唯一来源：整排重建（render）和就地换色（paintChips）都调这里，
+  // 两条路径就不可能给出两种颜色。
+  chipClass(i) {
+    const w = Number(this.st.weights?.[i]);
+    const ww = Number.isFinite(w) ? w : 1;
+    return `smchip ${this.isOn(i) ? "on" : "off"}${ww !== 1 ? " wtd" : ""}`;
+  }
+
+  // 悬停提示同理：就地换色不重建元素，title 也得跟着改，否则开关后提示还写着旧动作
+  chipTitle(i) {
+    return [
+      this.isOn(i) ? "单击关掉这一段（不进输出）" : "单击打开这一段",
+      "双击 = 就地改这个词",
+      "按住拖动 = 换位置",
+      "左侧 ＋/－ = 权重 ±0.05",
+      "右侧 × = 从文本框里删掉（可撤销）",
+    ].join("；");
+  }
+
+  // 就地换色：只改现有词片的 class、不重建元素，CSS 过渡才有起点（绿↔红淡过去的基础）。
+  // 段数对不上（文本被改过）就跑不动了，只能退回整排重建。
+  paintChips() {
+    const list = this.opts.list;
+    const segs = this.st.segs || [];
+    if (!list || this.editing) return this.render();
+    const els = Array.from(list.querySelectorAll(".smchip"));
+    if (els.length !== segs.length) return this.render();
+    els.forEach((el, i) => {
+      const cls = this.chipClass(i);
+      if (el.className !== cls) el.className = cls;
+      const tip = this.chipTitle(i);
+      if (el.title !== tip) el.title = tip;
+    });
+    this.updateCount();
+  }
+
+  // 批量改开关（全开 / 全关 / 反选）：同样就地换色，一排一起淡过去
+  applyMask(arr) {
+    if (!Array.isArray(arr)) return;
+    this.cancelPendingClick();
+    this.lastClick = null;
+    this.st.mask = arr;
+    this.opts.writeMask(arr);
+    this.paintChips();
+    this.opts.after?.();
+  }
+
   chipEl(seg, i, weight) {
     const on = this.isOn(i);
     const w = Number.isFinite(Number(weight)) ? Number(weight) : 1;
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.i = String(i);
-    b.className = `smchip ${on ? "on" : "off"}${w !== 1 ? " wtd" : ""}`;
-    b.title = [
-      on ? "单击关掉这一段（不进输出）" : "单击打开这一段",
-      "双击 = 就地改这个词",
-      "按住拖动 = 换位置",
-      "左侧 ＋/－ = 权重 ±0.05",
-      "右侧 × = 从文本框里删掉（可撤销）",
-    ].join("；");
+    b.className = this.chipClass(i);
+    b.title = this.chipTitle(i);
 
     const col = document.createElement("span");
     col.className = "wcol";
@@ -516,7 +565,7 @@ export class ChipList {
     mask[i] = mask[i] ? 0 : 1;
     st.mask = mask;
     this.opts.writeMask(mask);
-    this.render();
+    this.paintChips();   // 就地换色：绿↔红淡过去，不重建元素
     this.opts.after?.();
   }
 

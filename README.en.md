@@ -104,7 +104,7 @@ This is Text Gate combined with Prompt Toggle. It receives upstream text *and* s
 Its defining behaviour: **the node decides by whether you have interfered with the text, not merely by whether the box is empty.**
 
 - **Follow automatically**: untouched text is replaced by the latest upstream text on every run.
-- **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on.
+- **Per-chip switches**: click a chip to enable or disable it; a disabled chip stays in place and can be switched back on. The switch fades between green and red (0.28 s), so you can see the node react.
 - **Edit a chip in place**: double-click a chip and it becomes an input box; Enter (or clicking elsewhere) replaces only that segment — every other character and delimiter stays put. `Esc` cancels, clearing it deletes the segment.
 - **Chip weight**: `＋` / `－` on the left of a chip adjusts its weight and writes the result into the text box; a LoRA segment has its own strength field adjusted instead.
 - **Drag to reorder**: hold a chip, drag it, release — the text box is reordered and the switch and weight travel with that word.

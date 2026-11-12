@@ -84,6 +84,11 @@ await cdp("Page.enable");
 await cdp("Emulation.setDeviceMetricsOverride", {
   width: 1700, height: 1300, deviceScaleFactor: 2, mobile: false,
 });
+// 无头 Edge 默认上报 prefers-reduced-motion: reduce，前端会把过渡时长压到 1e-06s，
+// 颜色渐变根本不会发生——那是无障碍的正确行为，不是 bug。验证渐变必须显式关掉它。
+await cdp("Emulation.setEmulatedMedia", {
+  features: [{ name: "prefers-reduced-motion", value: "no-preference" }],
+});
 
 let ready = false;
 for (let i = 0; i < 90; i++) {
@@ -193,6 +198,71 @@ const after = __mask(n);
 return { before, immediate, after, flipped: immediate[1] === before[1] && after[1] !== before[1] };
 `,
 );
+
+// ---------------------------------------------------------------- 2b. 就地换色（绿↔红渐变）
+const fade = await run(
+  "开关不重建元素：同一个 DOM 节点，颜色在过渡中（0/80ms/之后 三点取值）",
+  `
+const n = window.__n;
+const pick = () => document.querySelector('.smchip[data-i="3"]');
+const el = pick();
+window.__fadeEl = el;
+const cs = getComputedStyle(el);
+const t0 = cs.backgroundColor;
+const transition = cs.transitionProperty + " / " + cs.transitionDuration;
+const titleBefore = el.title.split("；")[0];
+__tap(3);              // 单击 -> 220ms 后真的切换
+await __wait(300);     // 切换刚发生：此刻正处在 280ms 的过渡里
+const mid = getComputedStyle(el).backgroundColor;
+const titleAfter = el.title.split("；")[0];
+return {
+  sameElement: !!el.isConnected && el === pick(),
+  cls: el.className,
+  transition, t0, mid,
+  interpolated: mid !== t0,
+  titleBefore, titleAfter,
+  count: document.querySelector(".pfl-status")?.textContent,
+  clip: await __place(n, 0),
+};
+`,
+);
+const shotFade = await shot("04-fade-mid.png", fade.clip);
+
+const fadeEnd = await run(
+  "过渡落定 + 批量「全关」也是就地换色（元素不重建）",
+  `
+const n = window.__n;
+const el = window.__fadeEl;
+const pick = (i) => document.querySelector('.smchip[data-i="' + i + '"]');
+await __wait(500);
+const end = getComputedStyle(el).backgroundColor;
+const sameAfterFade = !!el.isConnected && el === pick(3);
+const beforeBulk = [...document.querySelectorAll(".smchip")];
+// 点「全关」按钮
+const bulkBtn = (label) => [...document.querySelectorAll("button")].find((b) => b.textContent === label);
+bulkBtn("全关")?.click();
+await __wait(120);
+const midBulk = getComputedStyle(pick(0)).backgroundColor;
+await __wait(500);
+const afterBulk = getComputedStyle(pick(0)).backgroundColor;
+const countOff = document.querySelector(".pfl-status")?.textContent;
+const bulkMask = __mask(n);
+// 复位成全开，后面的步骤照原样跑
+bulkBtn("全开")?.click();
+await __wait(500);
+return {
+  end,
+  sameAfterFade,
+  sameElementsAfterBulk: beforeBulk.every((b, i) => b === pick(i)),
+  classes: beforeBulk.map((b) => b.className),
+  midBulk, afterBulk, bulkFaded: midBulk !== afterBulk,
+  countOff, bulkMask,
+  maskReset: __mask(n),
+  clip: await __place(n, 0),
+};
+`,
+);
+const shotBulk = await shot("05-all-off.png", fadeEnd.clip);
 
 // ---------------------------------------------------------------- 3. 双击进入编辑
 const enter = await run(
