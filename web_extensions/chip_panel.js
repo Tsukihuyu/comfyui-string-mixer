@@ -87,15 +87,17 @@ const CSS = `
 /* 拖动预览：被拖的词片半透明，并实时插到目标位置，把两边的词挤开（不用落点线） */
 .sm-hint { font-size: 11px; opacity: .55; padding: 4px 2px; }
 
-/* 双击就地编辑：词片本体换成一个输入框，宽度跟着内容走（颜色仍继承开/关的红绿） */
-.smchip.editing { cursor: text; }
+/* 双击就地编辑 / 插入用的框：textarea，随内容换行长高（单行短词就是一行高，外观不变） */
 .smchip .smchip-edit {
   align-self: center; min-width: 48px; max-width: 100%;
-  font: inherit; font-size: 12px; line-height: 15px;
+  font: inherit; font-size: 12px; line-height: 17px; /* 与 .smchip 一致：进编辑时高度不跳 */
   color: inherit; background: rgba(0,0,0,.35);
   border: 1px solid currentColor; border-radius: 7px;
   padding: 0 4px; margin: 0; outline: none; box-sizing: border-box;
+  display: block; resize: none; overflow: hidden;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
 }
+.smchip.editing { cursor: text; }
 `;
 
 export function ensureChipStyles() {
@@ -473,31 +475,50 @@ export class ChipList {
   // ---------------------------------------------------------------- 双击就地编辑 / 双击空白插入
 
   // 造一个就地输入框（改词和新插入共用同一份行为：Enter 提交 / Esc 取消 / 失焦提交 / 中文输入法保护）
-  makeInput(initial, placeholder) {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "smchip-edit";
-    input.value = initial;
-    if (placeholder) input.placeholder = placeholder;
-    input.spellcheck = false;
-    input.autocomplete = "off";
+  // 用 textarea 而不是 input：input 是单行控件，长词折成两行以上时编辑只能看到一条窄缝。
+  makeInput(initial, placeholder, minWidth = 160) {
+    const el = document.createElement("textarea");
+    el.className = "smchip-edit";
+    el.value = initial;
+    if (placeholder) el.placeholder = placeholder;
+    el.spellcheck = false;
+    el.autocomplete = "off";
+    el.rows = 1;
+    el.wrap = "soft";
+    el.style.visibility = "hidden"; // 先进 DOM 量尺寸，量完整再露出来（否则会闪一帧矮框）
 
-    // 输入框宽度跟着内容走：用 canvas 量（输入框自己的 scrollWidth 要等布局）
-    const fitWidth = () => {
-      const cs = getComputedStyle(input);
+    const list = this.opts.list;
+    // 宽度跟着内容走（按最长一行量），夹在 [minWidth, 词片区可用宽]；高度跟着折行数长
+    const fit = () => {
+      const cs = getComputedStyle(el);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 2; // +2 边框
       const ctx = (this._measure ||= document.createElement("canvas").getContext("2d"));
-      if (!ctx) return;
-      ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-      const w = ctx.measureText(input.value || placeholder || "新词").width;
-      input.style.width = `${Math.min(240, Math.max(64, Math.ceil(w) + 18))}px`;
+      const maxW = Math.max(120, (list?.clientWidth || 300) - 8);
+      let w = minWidth;
+      if (ctx) {
+        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const longest = String(el.value || placeholder || "新词")
+          .split("\n")
+          .reduce((m, line) => Math.max(m, ctx.measureText(line).width), 0);
+        w = Math.max(minWidth, Math.ceil(longest) + padX);
+      }
+      el.style.width = `${Math.min(maxW, w)}px`;
+
+      // 高度：先归零再读 scrollHeight；不超过词片区可视高度，超了框内滚动
+      const maxH = Math.max(40, (list?.clientHeight || 200) - 4);
+      el.style.height = "auto";
+      const need = el.scrollHeight + 2; // scrollHeight 不含边框
+      el.style.height = `${Math.min(maxH, need)}px`;
+      el.style.overflowY = need > maxH ? "auto" : "hidden";
     };
 
     // chip 的手势处理器会 preventDefault，光标和选区会被一起吃掉 -> 这里拦住
-    input.addEventListener("pointerdown", (e) => e.stopPropagation());
-    input.addEventListener("mousedown", (e) => e.stopPropagation());
-    input.addEventListener("keydown", (e) => {
+    el.addEventListener("pointerdown", (e) => e.stopPropagation());
+    el.addEventListener("mousedown", (e) => e.stopPropagation());
+    el.addEventListener("keydown", (e) => {
       if (e.isComposing || e.keyCode === 229) return; // 输入法组字中，别当提交
       if (e.key === "Enter") {
+        // 换行不在这里做：提示词里的换行本身也是分隔符，要拆词直接输逗号
         e.preventDefault();
         e.stopPropagation();
         this.finishEdit(true);
@@ -507,15 +528,15 @@ export class ChipList {
         this.finishEdit(false);
       }
     });
-    input.addEventListener("input", () => fitWidth());
-    input.addEventListener("blur", () => {
+    el.addEventListener("input", () => fit());
+    el.addEventListener("blur", () => {
       if (this.editing) this.finishEdit(true); // 点到别处也算提交
     });
-    return { input, fitWidth };
+    return { input: el, fit };
   }
 
   // 编辑框挂进词片区，成为这一轮编辑的当前框
-  mountEditor(ed, box, fitWidth, selectAll) {
+  mountEditor(ed, box, fit, selectAll) {
     this.editing = ed;
     this.hideGapBar(); // 竖线让位给输入框
 
@@ -533,7 +554,8 @@ export class ChipList {
 
     ed.input.focus();
     if (selectAll) ed.input.select();
-    fitWidth();
+    fit();                              // 先在隐藏状态量好宽高，避免闪一帧矮框
+    ed.input.style.visibility = "";
     // 词片区可滚动：框可能落在可视区外，滚一把否则看着像没反应
     requestAnimationFrame(() => box.scrollIntoView?.({ block: "nearest" }));
   }
@@ -545,15 +567,21 @@ export class ChipList {
     const chip = list.querySelector(`.smchip[data-i="${i}"]`);
     if (!chip) return;
 
-    const { input, fitWidth } = this.makeInput(seg, "");
-    // <button> 里不能塞 <input>（交互元素套交互元素，浏览器会闹脾气），
+    // 起始宽度 = 原词片的文字宽度：同样的字、同样的宽，进编辑时字形不会跳
+    const cs = getComputedStyle(chip);
+    const innerW = Math.max(
+      64,
+      chip.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0),
+    );
+    const { input, fit } = this.makeInput(seg, "", innerW);
+    // <button> 里不能塞 <textarea>（交互元素套交互元素，浏览器会闹脾气），
     // 所以编辑期间把一个同色的 <div> 换上去，退出编辑后整体重画。
     const box = document.createElement("div");
     box.className = `${chip.className.replace(/\bediting\b/g, "").trim()} editing`;
     box.dataset.i = String(i);
     box.append(input);
     chip.replaceWith(box);
-    this.mountEditor({ mode: "edit", i, box, input, seg }, box, fitWidth, true);
+    this.mountEditor({ mode: "edit", i, box, input, seg }, box, fit, true);
   }
 
   // 双击词片之间的空白：在这个位置开一个空框，写进去的词插进文本同一位置。
@@ -564,7 +592,7 @@ export class ChipList {
     const segs = this.st.segs || [];
     const at = Math.max(0, Math.min(segs.length, k | 0));
 
-    const { input, fitWidth } = this.makeInput("", "输入新词…");
+    const { input, fit } = this.makeInput("", "输入新词…");
     const box = document.createElement("div");
     box.className = "smchip on editing"; // 新词默认开启：先长成绿的，写进去就是绿的
     box.dataset.insert = String(at);
@@ -576,7 +604,7 @@ export class ChipList {
     if (next) list.insertBefore(box, next);
     else list.appendChild(box);
 
-    this.mountEditor({ mode: "insert", k: at, box, input, seg: "" }, box, fitWidth, false);
+    this.mountEditor({ mode: "insert", k: at, box, input, seg: "" }, box, fit, false);
   }
 
   detachOutside() {

@@ -637,11 +637,82 @@ return { clip: await __place(n, 0) };
 `);
 const shotFromEmpty = await shot("09-insert-empty.png", clipFromEmpty.clip);
 
+const longEdit = await run(
+  "17-长词编辑：框跟词片同宽、随内容长高（不再是一条窄缝）",
+  `
+const n = window.__ins;
+const list = n.__pt.list;
+__setText(n, "short, extremelylongsegmentwithoutanycommasatallthatwilldefinitelyneedtowrapseveraltimesbecauseitisreallylong, tail");
+await __wait(1500);
+const chips = [...list.querySelectorAll(".smchip")];
+const idx = chips.findIndex((el) => (el.querySelector(".lbl")?.textContent || "").startsWith("extremely"));
+const chip = chips[idx];
+const cr = chip.getBoundingClientRect();
+await __dbl(idx);
+const ta = list.querySelector(".smchip-edit");
+if (!ta) return { opened: false };
+const editBox = list.querySelector(".smchip.editing");
+const rb = editBox.getBoundingClientRect();
+const r1 = ta.getBoundingClientRect();
+return {
+  opened: true, idx, tag: ta.tagName,
+  chipW: Math.round(cr.width), chipH: Math.round(cr.height),
+  boxW: Math.round(rb.width), boxH: Math.round(rb.height),
+  taW: Math.round(r1.width), taH: Math.round(r1.height),
+  sameWidth: Math.abs(rb.width - cr.width) <= 3,
+  asTallAsChip: Math.abs(rb.height - cr.height) <= 4,
+  innerScroll: ta.scrollHeight > ta.clientHeight + 2,
+  overflowX: ta.scrollWidth > ta.clientWidth + 1,
+  listW: list.clientWidth, listH: list.clientHeight,
+  clip: await __place(n, 0),
+};
+`,
+);
+const shotLong = await shot("10-long-edit.png", longEdit.clip);
+
+const longGrow = await run(
+  "18-长词编辑长高：继续加长内容框跟着变高，宽度封在词片区宽（不在框里横向滚）",
+  `
+const n = window.__ins;
+const list = n.__pt.list;
+const ta = list.querySelector(".smchip-edit");
+const r1 = ta.getBoundingClientRect();
+ta.value = ta.value + " " + "MORE".repeat(40);
+ta.dispatchEvent(new Event("input", { bubbles: true }));
+await __wait(250);
+const r2 = ta.getBoundingClientRect();
+const after = { boxW: Math.round(r2.width), boxH: Math.round(r2.height), scrollH: ta.scrollHeight, clientH: ta.clientHeight, overflowX: ta.scrollWidth > ta.clientWidth + 1 };
+// 再来一次巨型粘贴：高度必须停在词片区可视高度，改成框内滚动
+ta.value = "X".repeat(4000);
+ta.dispatchEvent(new Event("input", { bubbles: true }));
+await __wait(250);
+const capped = {
+  boxH: Math.round(ta.getBoundingClientRect().height),
+  listH: list.clientHeight,
+  overflowY: ta.style.overflowY,
+  scrollsInside: ta.scrollHeight > ta.clientHeight + 2,
+};
+ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+await __wait(400);
+return {
+  before: { w: Math.round(r1.width), h: Math.round(r1.height) },
+  after,
+  heightGrew: r2.height > r1.height,
+  widthCapped: Math.round(r2.width) <= list.clientWidth,
+  noHorizScroll: !after.overflowX,
+  capped,
+  heightCapped: capped.boxH <= capped.listH,
+  closedAfterEsc: !list.querySelector(".smchip-edit"),
+  textUnchanged: __widget(n, "text").value.startsWith("short, extremely"),
+};
+`,
+);
+
 // ---------------------------------------------------------------- 汇总
 const out = path.join(OUT, "verify-edit.json");
 fs.writeFileSync(out, JSON.stringify(results, null, 2));
 console.log("\n=== 实测结果 ===");
 console.log(JSON.stringify(results, null, 2));
-console.log(`\n截图：${shotEdit}\n      ${shotDone}\n      ${shotGate}\n      ${shotHover}\n      ${shotBox}\n      ${shotInserted}\n      ${shotFromEmpty}`);
+console.log(`\n截图：${shotEdit}\n      ${shotDone}\n      ${shotGate}\n      ${shotHover}\n      ${shotBox}\n      ${shotInserted}\n      ${shotFromEmpty}\n      ${shotLong}`);
 ws.close();
 edge.kill();
