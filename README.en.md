@@ -20,6 +20,20 @@ It is a small toolkit that grew out of real use. I hope it makes your ComfyUI wo
 
 ---
 
+## Changelog
+
+### 1.3.0 — chips became editable, and pinnable
+
+- **Edit a chip in place**: double-click a chip and it turns into a wrapping editor that grows with the text (long segments are no longer squeezed into a narrow slit). Only that segment is replaced; every other character stays put. `Esc` cancels, clearing deletes it.
+- **Insert in empty space**: double-click between chips, after the last chip of a row, or in the empty area below them to add a new segment at the nearest gap; a thin line marks the insertion point on hover.
+- **Per-chip lock**: the small padlock at the far left (cyan = pinned, grey-green = free). A pinned segment cannot be deleted with ×, emptied by hand, removed by ✕ clear, overwritten by an upstream text, or duplicated by reservoir absorbing. Locking never forces output — a pinned segment that is switched off still stays out of the result.
+- **Colour fade**: the on/off switch fades between green and red over 0.28 s.
+- **Fixes**: the Text Gate Toggle node grew by 12 px on every layout pass on some frontends; long chips collapsed into a one-line editor; chip gaps 6 px → 8 px.
+
+Older versions: [commit history](https://github.com/Tsukihuyu/comfyui-string-mixer/commits/main).
+
+---
+
 ## Contents
 
 Install · Node overview · Text Gate · Text Gate Toggle · Prompt Toggle · Text Mix 3/5/7 · Prompt Cleaner · Prompt File · Camera Rig · Skill Writer / Skill Layout · SkillPrompt setup
